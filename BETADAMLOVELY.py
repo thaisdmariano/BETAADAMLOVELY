@@ -202,8 +202,9 @@ def parse_text_reaction(prompt: str, reactions: Set[str]) -> Tuple[str, str]:
         # Then check for emoji-like characters (unicode > 255 for better accuracy)
         # Emojis typically are in ranges U+1F600+ (> 0x1F600)
         is_emoji = any(ord(c) > 255 for c in last)
-        is_short_reaction = len(last) <= 3
-        if last in reactions or is_emoji or (is_short_reaction and is_emoji):
+        is_short_reaction = len(last) <= 3 and last in reactions
+        # Accept if: known reaction, emoji, or short known reaction
+        if last in reactions or is_emoji or is_short_reaction:
             txt = ' '.join(words[:-1])
             reac = last
             return txt, reac
