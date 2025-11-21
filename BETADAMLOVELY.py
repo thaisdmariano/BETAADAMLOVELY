@@ -156,9 +156,11 @@ def variar_texto(texto: str, bloco: dict, dominio: str) -> str:
             # Filtrar vars válidas (remover "0.0" que é placeholder)
             valid_vars = [v for v in data["vars"] if v != "0.0"]
             if valid_vars and len(valid_vars) > 0:
-                # Enhanced: Give higher weight to variations (70% chance to use variation)
-                choices = valid_vars + valid_vars + [tok]  # Double the variations for higher probability
-                chosen_var = random.choice(choices)
+                # Enhanced: 70% probability to use a variation, 30% to keep original
+                if random.random() < 0.7:
+                    chosen_var = random.choice(valid_vars)
+                else:
+                    chosen_var = tok
             else:
                 chosen_var = tok
         else:
@@ -196,10 +198,12 @@ def parse_text_reaction(prompt: str, reactions: Set[str]) -> Tuple[str, str]:
     words = s.split()
     if words:
         last = words[-1]
-        # Enhanced: Better emoji detection (emojis have unicode > 127)
-        is_emoji = any(ord(c) > 127 for c in last)
+        # Enhanced: Check if it's in the known reactions set first (most reliable)
+        # Then check for emoji-like characters (unicode > 255 for better accuracy)
+        # Emojis typically are in ranges U+1F600+ (> 0x1F600)
+        is_emoji = any(ord(c) > 255 for c in last)
         is_short_reaction = len(last) <= 3
-        if is_emoji or (is_short_reaction and last in reactions):
+        if last in reactions or is_emoji or (is_short_reaction and is_emoji):
             txt = ' '.join(words[:-1])
             reac = last
             return txt, reac
@@ -1871,9 +1875,10 @@ def weighted_choice(variations, bloco_id, likes=None):
     weights = []
     for var in variations:
         count = likes[bloco_id].get(var, 0)
-        # Exponential weighting: liked responses get much higher probability
-        # Base weight of 1.0, then multiply by (2^count) for stronger impact
-        weight = 1.0 * (2 ** count) if count > 0 else 1.0
+        # Exponential weighting with cap to prevent overflow and extreme bias
+        # Base weight of 1.0, then multiply by (2^count) but cap at 100x
+        # This gives strong preference (2x, 4x, 8x...) but prevents extreme values
+        weight = min(1.0 * (2 ** count), 100.0) if count > 0 else 1.0
         weights.append(weight)
     return random.choices(variations, weights=weights, k=1)[0]
 
