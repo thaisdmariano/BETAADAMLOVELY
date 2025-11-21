@@ -639,10 +639,15 @@ def train(memoria: dict, dominio: str) -> None:
 
     st.success(f"✅ Treino concluído. best_val_loss={best:.4f}")
     
-    # Salvar backup do JSON usado para treinamento
-    backup_memoria = f"Adam_Lovely_memory_backup_{dominio}_{int(time.time())}.json"
-    salvar_json(backup_memoria, memoria)
-    st.info(f"📁 Backup do JSON salvo como: {backup_memoria}")
+    # Gerar JSON para download em vez de salvar na área de trabalho
+    memoria_json = json.dumps(memoria, ensure_ascii=False, indent=2)
+    st.download_button(
+        label="📥 Baixar Backup do JSON de Memória",
+        data=memoria_json,
+        file_name=f"Adam_Lovely_memory_backup_{dominio}_{int(time.time())}.json",
+        mime="application/json",
+        key=f"download_backup_{dominio}_{int(time.time())}"
+    )
 
 
 def train_autoencoder(memoria: dict, dominio: str) -> None:
@@ -727,7 +732,12 @@ def gerar_bloco_novo_unsupervised(memoria: dict, dominio: str, entrada_texto: st
     template_bloco = blocos[0]
 
     # Generate new text by varying existing patterns
-    new_texto = variar_texto(template_bloco["saidas"][0]["textos"][0], template_bloco, dominio)
+    base_texto = template_bloco["saidas"][0]["textos"][0]
+    new_textos = []
+    for i in range(3):  # Generate 3 texts like in templates
+        varied = variar_texto(base_texto, template_bloco, dominio)
+        new_textos.append(varied)
+    
     new_reacao = template_bloco["saidas"][0].get("reacao", "")
     new_contexto = template_bloco["saidas"][0].get("contexto", "")
 
@@ -745,7 +755,7 @@ def gerar_bloco_novo_unsupervised(memoria: dict, dominio: str, entrada_texto: st
             "alnulu": len(entrada_texto)
         },
         "saidas": [{
-            "textos": [new_texto],
+            "textos": new_textos,
             "reacao": new_reacao,
             "contexto": new_contexto,
             "tokens": {},
@@ -771,6 +781,11 @@ def generate_insight(bloco, chosen=None):
         emoji = bloco["saidas"][0].get("reacao", "")
         return f"Baseado na entrada '{ep_txt}', reação '{ep_reac}' e contexto '{contexto}', conclui que '{chosen} {emoji}' é a resposta mais adequada."
     return None
+
+
+def generate_pide_insight(txt: str, reac: str, ctx_new: str) -> str:
+    """Gera PIDE automático baseado em insight preliminar."""
+    return f"Recebi '{txt}' com reação '{reac}' no contexto '{ctx_new}'. Preciso pensar sobre como responder adequadamente. Vou analisar a situação e formular uma resposta apropriada."
 
 
 def infer(memoria: dict, dominio: str) -> None:
@@ -949,273 +964,216 @@ def infer(memoria: dict, dominio: str) -> None:
         # Parse entrada normal
         txt, reac = parse_text_reaction(prompt, all_possible_reactions)
         bloco = None
+        # Strict matching: exact Text + Reaction
         for b in blocos:
-            # Verificar Multivars_Entrada primeiro (frases completas)
-            if txt in b["entrada"].get("Multivars_Entrada", []):
-                bloco = b
-                break
-            # Matching por tokens e vars
-            txt_variations = get_variations_for_tokens(dominio, b["bloco_id"], "Entrada", b["entrada"]["tokens"].get("E", []))
-            reac_variations = get_variations_for_tokens(dominio, b["bloco_id"], "Entrada", b["entrada"]["tokens"].get("RE", []))
-            txt_tokens = Token(txt)
-            if all(normalize(t) in txt_variations for t in txt_tokens) and (not b["entrada"]["tokens"].get("RE") or (reac and normalize(reac) in reac_variations)):
+            if b["entrada"]["texto"] == txt and b["entrada"].get("reacao") == reac:
                 bloco = b
                 break
         if bloco is None:
-            # Verificar se o texto matching mas a reação não
-            similar_blocos = []
-            for b in blocos:
-                txt_variations = get_variations_for_tokens(dominio, b["bloco_id"], "Entrada", b["entrada"]["tokens"].get("E", []))
-                if all(normalize(t) in txt_variations for t in txt_tokens):
-                    similar_blocos.append(b)
-            if similar_blocos:
-                # Interactive for new reaction
-                st.session_state.messages.append({"role": "assistant", "content": "Hmm, parece que o texto combina com alguns blocos, mas a emoção não. Vamos criar uma nova reação!"})
-                with st.chat_message("assistant"):
-                    st.markdown("Hmm, parece que o texto combina com alguns blocos, mas a emoção não. Vamos criar uma nova reação!")
-                # Ask for clarification
-                clarify = st.text_input("Qual emoção você queria expressar? (ex: 😊, 😢)", key="clarify_reaction")
-                if not clarify:
-                    st.rerun()
-                reac_clarified = clarify.strip()
-                # Generate saidas_geradas from similar blocks
-                saidas_geradas = []
-                for bloco_sim in similar_blocos:
-                    saidas_geradas.extend(get_variations_for_tokens(dominio, bloco_sim["bloco_id"], "Saída", bloco_sim["saidas"][0]["tokens"].get("S", [])))
-                saidas_geradas = list(set(saidas_geradas))
-                if not saidas_geradas:
-                    # Use autoencoder
-                    bloco_generated = gerar_bloco_novo_unsupervised(memoria, dominio, txt, reac_clarified, "")
-                    if bloco_generated:
-                        saidas_geradas = bloco_generated["saidas"][0]["textos"]
-                    else:
-                        saidas_geradas = ["Desculpe, não consegui gerar uma resposta."]
-                # Show options
-                st.write("Opções geradas:")
-                for i, saida in enumerate(saidas_geradas[:5]):  # limit to 5
-                    if st.button(f"Aprovar: {saida}", key=f"approve_{i}"):
-                        # Create new block
-                        universo = memoria["IM"][dominio]
-                        blocos = universo["blocos"]
-                        next_id = len(blocos) + 1
-                        new_bloco = {
-                            "bloco_id": next_id,
-                            "entrada": {
-                                "texto": txt,
-                                "reacao": reac_clarified,
-                                "contexto": "",
-                                "pensamento_interno": "",
-                                "tokens": {},
-                                "fim": "",
-                                "alnulu": len(txt)
-                            },
-                            "saidas": [{
-                                "textos": [saida],
-                                "reacao": reac_clarified,
-                                "contexto": "",
-                                "tokens": {},
-                                "fim": ""
-                            }],
-                            "open": True
-                        }
-                        # Tokenize and set markers
-                        current_last = universo["ultimo_child"]
-                        E = Token(txt)
-                        RE = [reac_clarified] if reac_clarified else []
-                        CE = []
-                        PIDE_full = []
-                        PIDE_limited = []
-                        S = Token(saida)
-                        RS = [reac_clarified] if reac_clarified else []
-                        CS = []
-                        entrada_tokens = E + RE + CE + PIDE_full
-                        saida_tokens = S + RS + CS
-                        ent_marks_inco = generate_markers(current_last, len(entrada_tokens))
-                        out_marks = generate_markers(ent_marks_inco[-1], len(saida_tokens))
-                        fim_ent = ent_marks_inco[-1]
-                        fim_out = out_marks[-1]
-                        ent_marks = ent_marks_inco[:len(E) + len(RE) + len(CE) + len(PIDE_limited)]
-                        idx = 0
-                        E_m = ent_marks[idx: idx + len(E)]; idx += len(E)
-                        RE_m = ent_marks[idx: idx + len(RE)]; idx += len(RE)
-                        CE_m = ent_marks[idx: idx + len(CE)]; idx += len(CE)
-                        PIDE_m = ent_marks[idx: idx + len(PIDE_limited)]
-                        jdx = 0
-                        S_m = out_marks[jdx: jdx + len(S)]; jdx += len(S)
-                        RS_m = out_marks[jdx: jdx + len(RS)]; jdx += len(RS)
-                        CS_m = out_marks[jdx: jdx + len(CS)]
-                        new_bloco["entrada"]["tokens"] = {
-                            "E": E_m,
-                            "RE": RE_m,
-                            "CE": CE_m,
-                            "PIDE": PIDE_m,
-                            "TOTAL": ent_marks_inco
-                        }
-                        new_bloco["entrada"]["fim"] = fim_ent
-                        new_bloco["saidas"][0]["tokens"] = {
-                            "S": S_m,
-                            "RS": RS_m,
-                            "CS": CS_m,
-                            "TOTAL": out_marks
-                        }
-                        new_bloco["saidas"][0]["fim"] = fim_out
-                        universo["ultimo_child"] = fim_out
-                        blocos.append(new_bloco)
-                        salvar_json(ARQUIVO_MEMORIA, memoria)
-                        # Add to inconsciente
-                        inconsciente = st.session_state.inconsciente
-                        bloco_data = {
-                            "Bloco_id": str(next_id),
-                            "Entrada": {m: {"token": t, "vars": ["0.0"]} for m, t in zip(ent_marks_inco, entrada_tokens)},
-                            "SAÍDA": {m: {"token": t, "vars": ["0.0"]} for m, t in zip(out_marks, saida_tokens)}
-                        }
-                        if dominio in inconsciente.get("INCO", {}):
-                            inconsciente["INCO"][dominio]["Blocos"].append(bloco_data)
-                            inconsciente["INCO"][dominio]["Ultimo child"] = fim_out
-                        else:
-                            inconsciente.setdefault("INCO", {})[dominio] = {
-                                "NOME": universo["nome"],
-                                "Ultimo child": fim_out,
-                                "Blocos": [bloco_data]
-                            }
-                        salvar_json(ARQUIVO_INCONSCIENTE, inconsciente)
-                        st.success("Novo bloco criado com sucesso!")
-                        st.rerun()
-                if st.button("Rejeitar todas", key="reject_all"):
-                    st.session_state.messages.append({"role": "assistant", "content": "Ok, vamos tentar novamente."})
-                    with st.chat_message("assistant"):
-                        st.markdown("Ok, vamos tentar novamente.")
-                    st.rerun()
-            # Se não encontrou nem texto, tentar histórico ou erro
-            if st.session_state.conversa_blocos:
-                bloco = st.session_state.conversa_blocos[-1]
-                st.session_state.messages.append({"role": "assistant", "content": f"💭 Continuando do bloco {bloco['bloco_id']}..."})
-                with st.chat_message("assistant"):
-                    st.markdown(f"💭 Continuando do bloco {bloco['bloco_id']}...")
-        else:
-            # Completely new, interactive
+            # Interactive mode for new block
             st.session_state.messages.append({"role": "assistant", "content": "Hmm, isso é completamente novo para mim. Vamos criar uma nova expressão juntos!"})
             with st.chat_message("assistant"):
                 st.markdown("Hmm, isso é completamente novo para mim. Vamos criar uma nova expressão juntos!")
-            # Ask for reaction
-            reac_input = st.text_input("Qual emoção ou reação você quer associar? (ex: 😊, 😢)", key="new_reac")
-            if not reac_input:
-                st.rerun()
-            reac_new = reac_input.strip()
-            # Ask for context
-            ctx_input = st.text_area("Qual é o contexto dessa expressão? (opcional)", key="new_ctx", height=50)
-            ctx_new = ctx_input.strip()
-            # Ask for pensamento
-            pens_input = st.text_area("O que você acha que eu deveria pensar sobre isso? (opcional)", key="new_pens", height=50)
-            pens_new = pens_input.strip()
-            # Generate saidas using autoencoder
-            bloco_generated = gerar_bloco_novo_unsupervised(memoria, dominio, txt, reac_new, ctx_new)
-            if bloco_generated:
-                saidas_geradas = bloco_generated["saidas"][0]["textos"]
-            else:
-                saidas_geradas = ["Desculpe, não consegui gerar uma resposta."]
-            # Show options
-            st.write("Opções geradas:")
-            for i, saida in enumerate(saidas_geradas[:5]):
-                if st.button(f"Aprovar: {saida}", key=f"approve_new_{i}"):
-                    # Create new block with context and pensamento
-                    universo = memoria["IM"][dominio]
-                    blocos = universo["blocos"]
-                    next_id = len(blocos) + 1
-                    new_bloco = {
-                        "bloco_id": next_id,
-                        "entrada": {
-                            "texto": txt,
-                            "reacao": reac_new,
-                            "contexto": ctx_new,
-                            "pensamento_interno": pens_new,
-                            "tokens": {},
-                            "fim": "",
-                            "alnulu": len(txt)
-                        },
-                        "saidas": [{
-                            "textos": [saida],
-                            "reacao": reac_new,
-                            "contexto": ctx_new,
-                            "tokens": {},
-                            "fim": ""
-                        }],
-                        "open": True
-                    }
-                    # Tokenize
-                    current_last = universo["ultimo_child"]
-                    E = Token(txt)
-                    RE = [reac_new] if reac_new else []
-                    CE = Token(ctx_new)
-                    pensamento_limpo = pens_new.strip('"')
-                    partes = pensamento_limpo.split('.')[:3]
-                    PIDE_full = []
-                    for parte in partes:
-                        PIDE_full.extend(Token(parte.strip()))
-                    PIDE_limited = PIDE_full[:3]
-                    S = Token(saida)
-                    RS = [reac_new] if reac_new else []
-                    CS = Token(ctx_new)
-                    entrada_tokens = E + RE + CE + PIDE_full
-                    saida_tokens = S + RS + CS
-                    ent_marks_inco = generate_markers(current_last, len(entrada_tokens))
-                    out_marks = generate_markers(ent_marks_inco[-1], len(saida_tokens))
-                    fim_ent = ent_marks_inco[-1]
-                    fim_out = out_marks[-1]
-                    ent_marks = ent_marks_inco[:len(E) + len(RE) + len(CE) + len(PIDE_limited)]
-                    idx = 0
-                    E_m = ent_marks[idx: idx + len(E)]; idx += len(E)
-                    RE_m = ent_marks[idx: idx + len(RE)]; idx += len(RE)
-                    CE_m = ent_marks[idx: idx + len(CE)]; idx += len(CE)
-                    PIDE_m = ent_marks[idx: idx + len(PIDE_limited)]
-                    jdx = 0
-                    S_m = out_marks[jdx: jdx + len(S)]; jdx += len(S)
-                    RS_m = out_marks[jdx: jdx + len(RS)]; jdx += len(RS)
-                    CS_m = out_marks[jdx: jdx + len(CS)]
-                    new_bloco["entrada"]["tokens"] = {
-                        "E": E_m,
-                        "RE": RE_m,
-                        "CE": CE_m,
-                        "PIDE": PIDE_m,
-                        "TOTAL": ent_marks_inco
-                    }
-                    new_bloco["entrada"]["fim"] = fim_ent
-                    new_bloco["saidas"][0]["tokens"] = {
-                        "S": S_m,
-                        "RS": RS_m,
-                        "CS": CS_m,
-                        "TOTAL": out_marks
-                    }
-                    new_bloco["saidas"][0]["fim"] = fim_out
-                    universo["ultimo_child"] = fim_out
-                    blocos.append(new_bloco)
-                    salvar_json(ARQUIVO_MEMORIA, memoria)
-                    # Add to inconsciente
-                    inconsciente = st.session_state.inconsciente
-                    bloco_data = {
-                        "Bloco_id": str(next_id),
-                        "Entrada": {m: {"token": t, "vars": ["0.0"]} for m, t in zip(ent_marks_inco, entrada_tokens)},
-                        "SAÍDA": {m: {"token": t, "vars": ["0.0"]} for m, t in zip(out_marks, saida_tokens)}
-                    }
-                    if dominio in inconsciente.get("INCO", {}):
-                        inconsciente["INCO"][dominio]["Blocos"].append(bloco_data)
-                        inconsciente["INCO"][dominio]["Ultimo child"] = fim_out
+            
+            # Pre-fill new block with placeholders
+            novo_bloco = {
+                "bloco_id": 0,  # Will be set later
+                "entrada": {
+                    "texto": txt,
+                    "reacao": reac,
+                    "contexto": "0.0",  # Placeholder
+                    "pensamento_interno": "0.0",  # Placeholder
+                    "tokens": {},
+                    "fim": "",
+                    "alnulu": len(txt)
+                },
+                "saidas": [{
+                    "textos": [],  # Will be generated
+                    "reacao": reac,
+                    "contexto": "0.0",  # Placeholder
+                    "tokens": {},
+                    "fim": ""
+                }],
+                "open": True
+            }
+            
+            # Passo 1: Perguntar Contexto
+            with st.form("form_contexto"):
+                st.write("Qual é o contexto dessa mensagem?")
+                contexto_input = st.text_input("Contexto:", key="contexto_new")
+                submitted_contexto = st.form_submit_button("Confirmar Contexto")
+                if submitted_contexto and contexto_input.strip():
+                    st.session_state.contexto = contexto_input.strip()
+                    st.rerun()  # Só rerun após sucesso
+            
+            # Só mostre o próximo se contexto confirmado
+            if "contexto" in st.session_state:
+                # Passo 2: PIDE automático + Edição
+                with st.form("form_pide"):
+                    pide_prelim = generate_pide_insight(txt, reac, st.session_state.contexto)
+                    st.write("O quê o Adam deveria pensar sobre isso?")
+                    pide_input = st.text_area("PIDE:", value=pide_prelim, key="pide_new", height=100)
+                    submitted_pide = st.form_submit_button("Confirmar PIDE")
+                    if submitted_pide and pide_input.strip():
+                        st.session_state.pide = pide_input.strip()
+                        st.rerun()
+            
+            # Só mostre o próximo se PIDE confirmado
+            if "pide" in st.session_state:
+                # Passo 3: Busca similares e gera saídas
+                # (Código de busca ALNULU + geração como antes)
+                st.write("Buscando similares e gerando saídas...")
+                
+                # Buscar blocos similares usando ALNULU embeddings
+                def alnulu_encode(text: str) -> list:
+                    """Simula encoding ALNULU baseado em tokens."""
+                    tokens = Token(text)
+                    # Simples: vetor de frequências de tokens únicos
+                    unique_tokens = set(tokens)
+                    return list(unique_tokens)
+                
+                def cosine_similarity(vec1: list, vec2: list) -> float:
+                    """Similaridade baseada em interseção de tokens."""
+                    set1 = set(vec1)
+                    set2 = set(vec2)
+                    intersection = len(set1 & set2)
+                    union = len(set1 | set2)
+                    return intersection / union if union > 0 else 0.0
+                
+                # Codificar entrada atual
+                entrada_atual = f"{txt} {reac} {st.session_state.contexto} {st.session_state.pide}"
+                encoded_input = alnulu_encode(entrada_atual)
+                
+                # Buscar blocos similares
+                similares = []
+                blocos = memoria["IM"][dominio]["blocos"]
+                for b in blocos:
+                    bloco_texto = f"{b['entrada']['texto']} {b['entrada']['reacao']} {b['entrada']['contexto']} {b['entrada']['pensamento_interno']}"
+                    encoded_bloco = alnulu_encode(bloco_texto)
+                    similaridade = cosine_similarity(encoded_input, encoded_bloco)
+                    if similaridade > 0.3:  # Threshold ajustável
+                        similares.append((b, similaridade))
+                
+                # Ordenar por similaridade
+                similares.sort(key=lambda x: x[1], reverse=True)
+                similares = similares[:3]  # Top 3
+                
+                # Gerar saídas baseadas em similares
+                saidas_geradas = []
+                if similares:
+                    st.write(f"Encontrei {len(similares)} blocos similares. Gerando variações...")
+                    for sim_bloco, sim_score in similares:
+                        for saida in sim_bloco["saidas"][0]["textos"]:
+                            varied = variar_texto(saida, sim_bloco, dominio)
+                            saidas_geradas.append(varied)
+                    # Remover duplicatas
+                    saidas_geradas = list(set(saidas_geradas))
+                else:
+                    st.write("Nenhum bloco similar encontrado. Usando geração unsupervised...")
+                
+                # Fallback para geração unsupervised se poucas saídas
+                if len(saidas_geradas) < 3:
+                    bloco_generated = gerar_bloco_novo_unsupervised(memoria, dominio, txt, reac, st.session_state.contexto)
+                    if bloco_generated:
+                        saidas_geradas.extend(bloco_generated["saidas"][0]["textos"])
                     else:
-                        inconsciente.setdefault("INCO", {})[dominio] = {
-                            "NOME": universo["nome"],
-                            "Ultimo child": fim_out,
-                            "Blocos": [bloco_data]
-                        }
-                    salvar_json(ARQUIVO_INCONSCIENTE, inconsciente)
-                    st.success("Novo bloco criado com sucesso!")
-                    st.rerun()
-            if st.button("Rejeitar todas", key="reject_new"):
-                st.session_state.messages.append({"role": "assistant", "content": "Ok, vamos tentar novamente."})
-                with st.chat_message("assistant"):
-                    st.markdown("Ok, vamos tentar novamente.")
-                st.rerun()        # Adicionar bloco ao histórico se for novo
-        if bloco and bloco not in st.session_state.conversa_blocos:
-            st.session_state.conversa_blocos.append(bloco)
+                        saidas_geradas.append("Desculpe, não consegui gerar uma resposta.")
+                
+                novo_bloco["saidas"][0]["textos"] = saidas_geradas[:5]  # Limitar a 5
+                st.session_state.saidas_geradas = saidas_geradas[:5]
+                
+                # Passo 4: Aprovação
+                with st.form("form_aprovacao"):
+                    st.write("Opções geradas:")
+                    for i, saida in enumerate(st.session_state.saidas_geradas):
+                        if st.checkbox(f"Aprovar: {saida}", key=f"approve_{i}"):
+                            # Criar bloco
+                            universo = memoria["IM"][dominio]
+                            blocos = universo["blocos"]
+                            next_id = len(blocos) + 1
+                            novo_bloco["bloco_id"] = next_id
+                            
+                            # Setar valores do session_state
+                            novo_bloco["entrada"]["contexto"] = st.session_state.contexto
+                            novo_bloco["saidas"][0]["contexto"] = st.session_state.contexto
+                            novo_bloco["entrada"]["pensamento_interno"] = st.session_state.pide
+                            
+                            # Tokenize and set markers
+                            current_last = universo["ultimo_child"]
+                            E = Token(txt)
+                            RE = [reac] if reac else []
+                            CE = Token(st.session_state.contexto)
+                            pensamento_limpo = st.session_state.pide.strip('"')
+                            partes = pensamento_limpo.split('.')[:3]
+                            PIDE_full = []
+                            for parte in partes:
+                                PIDE_full.extend(Token(parte.strip()))
+                            PIDE_limited = PIDE_full[:3]
+                            S = Token(saida)
+                            RS = [reac] if reac else []
+                            CS = Token(st.session_state.contexto)
+                            entrada_tokens = E + RE + CE + PIDE_full
+                            saida_tokens = S + RS + CS
+                            ent_marks_inco = generate_markers(current_last, len(entrada_tokens))
+                            out_marks = generate_markers(ent_marks_inco[-1], len(saida_tokens))
+                            fim_ent = ent_marks_inco[-1]
+                            fim_out = out_marks[-1]
+                            ent_marks = ent_marks_inco[:len(E) + len(RE) + len(CE) + len(PIDE_limited)]
+                            idx = 0
+                            E_m = ent_marks[idx: idx + len(E)]; idx += len(E)
+                            RE_m = ent_marks[idx: idx + len(RE)]; idx += len(RE)
+                            CE_m = ent_marks[idx: idx + len(CE)]; idx += len(CE)
+                            PIDE_m = ent_marks[idx: idx + len(PIDE_limited)]
+                            jdx = 0
+                            S_m = out_marks[jdx: jdx + len(S)]; jdx += len(S)
+                            RS_m = out_marks[jdx: jdx + len(RS)]; jdx += len(RS)
+                            CS_m = out_marks[jdx: jdx + len(CS)]
+                            novo_bloco["entrada"]["tokens"] = {
+                                "E": E_m,
+                                "RE": RE_m,
+                                "CE": CE_m,
+                                "PIDE": PIDE_m,
+                                "TOTAL": ent_marks_inco
+                            }
+                            novo_bloco["entrada"]["fim"] = fim_ent
+                            novo_bloco["saidas"][0]["tokens"] = {
+                                "S": S_m,
+                                "RS": RS_m,
+                                "CS": CS_m,
+                                "TOTAL": out_marks
+                            }
+                            novo_bloco["saidas"][0]["fim"] = fim_out
+                            universo["ultimo_child"] = fim_out
+                            blocos.append(novo_bloco)
+                            salvar_json(ARQUIVO_MEMORIA, memoria)
+                            
+                            # Add to inconsciente
+                            inconsciente = st.session_state.inconsciente
+                            bloco_data = {
+                                "Bloco_id": str(next_id),
+                                "Entrada": {m: {"token": t, "vars": ["0.0"]} for m, t in zip(ent_marks_inco, entrada_tokens)},
+                                "SAÍDA": {m: {"token": t, "vars": ["0.0"]} for m, t in zip(out_marks, saida_tokens)}
+                            }
+                            if dominio in inconsciente.get("INCO", {}):
+                                inconsciente["INCO"][dominio]["Blocos"].append(bloco_data)
+                                inconsciente["INCO"][dominio]["Ultimo child"] = fim_out
+                            else:
+                                inconsciente.setdefault("INCO", {})[dominio] = {
+                                    "NOME": universo["nome"],
+                                    "Ultimo child": fim_out,
+                                    "Blocos": [bloco_data]
+                                }
+                            salvar_json(ARQUIVO_INCONSCIENTE, inconsciente)
+                            st.success("Novo bloco criado com sucesso!")
+                            # Limpar session_state
+                            del st.session_state.contexto, st.session_state.pide, st.session_state.saidas_geradas
+                    submitted_aprovacao = st.form_submit_button("Finalizar")
+                    if submitted_aprovacao:
+                        st.rerun()
+        else:
+            # bloco found, proceed with normal response
+            if bloco and bloco not in st.session_state.conversa_blocos:
+                st.session_state.conversa_blocos.append(bloco)
 
         st.session_state.current_bloco = bloco
         st.session_state.variation = 0
@@ -3030,19 +2988,31 @@ def submenu_backup(memoria: dict, inconsciente: dict) -> None:
     
     with col3:
         if st.button("💾 Fazer Backup Manual"):
-            # Salvar backups manuais com timestamp
+            # Gerar JSONs para download em vez de salvar no disco
             import time
             timestamp = int(time.time())
-            backup_memoria_file = f"Adam_Lovely_memory_manual_backup_{timestamp}.json"
-            backup_inconsciente_file = f"Adam_Lovely_inconscious_manual_backup_{timestamp}.json"
-            salvar_json(backup_memoria_file, memoria)
-            salvar_json(backup_inconsciente_file, inconsciente)
-            st.success(f"✅ Backups manuais salvos: {backup_memoria_file} e {backup_inconsciente_file}")
+            memoria_json = json.dumps(memoria, ensure_ascii=False, indent=2)
+            inconsciente_json = json.dumps(inconsciente, ensure_ascii=False, indent=2)
+            st.download_button(
+                label="📥 Baixar Backup de Memória",
+                data=memoria_json,
+                file_name=f"Adam_Lovely_memory_manual_backup_{timestamp}.json",
+                mime="application/json",
+                key=f"download_manual_memoria_{timestamp}"
+            )
+            st.download_button(
+                label="📥 Baixar Backup do Inconsciente",
+                data=inconsciente_json,
+                file_name=f"Adam_Lovely_inconscious_manual_backup_{timestamp}.json",
+                mime="application/json",
+                key=f"download_manual_inconsciente_{timestamp}"
+            )
+            st.success("✅ Backups prontos para download!")
     
     st.warning("⚠️ **Atenção:** 'Reiniciar Sessão' limpa todos os dados não salvos. Faça backup antes!")
 
 
-def infer_standalone(entrada: str, dominio: str, memoria: dict, inconsciente: dict, model) -> str:
+def infer_standalone(entrada: str, dominio: str, memoria: dict, inconsciente: dict, model, contexto: str = "") -> str:
     """Inferência standalone sem UI."""
     blocos = memoria["IM"][dominio]["blocos"]
     
@@ -3085,14 +3055,14 @@ def infer_standalone(entrada: str, dominio: str, memoria: dict, inconsciente: di
                 similar_blocos.append(b)
         if similar_blocos:
             # Use autoencoder for new reaction
-            bloco_generated = gerar_bloco_novo_unsupervised(memoria, dominio, txt, reac or "", "")
+            bloco_generated = gerar_bloco_novo_unsupervised(memoria, dominio, txt, reac or "", contexto)
             if bloco_generated:
                 bloco = bloco_generated
             else:
                 return "Desculpe, não consegui gerar uma resposta."
         else:
             # Completely new, use autoencoder
-            bloco_generated = gerar_bloco_novo_unsupervised(memoria, dominio, txt, reac or "", "")
+            bloco_generated = gerar_bloco_novo_unsupervised(memoria, dominio, txt, reac or "", contexto)
             if bloco_generated:
                 bloco = bloco_generated
             else:
@@ -3230,7 +3200,7 @@ def test_model_standalone():
     entrada = "E aí Athos B)"
     print(f"Testando entrada: {entrada}")
     try:
-        resposta = infer_standalone(entrada, dominio, memoria, inconsciente, model)
+        resposta = infer_standalone(entrada, dominio, memoria, inconsciente, model, "")
         print(f"Resposta gerada: {resposta}")
     except Exception as e:
         print(f"Erro na inferência: {e}")
