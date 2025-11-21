@@ -1,0 +1,36 @@
+# Python cache
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+
+# PyTorch models and checkpoints
+*.pt
+*.pth
+autoencoder_*.pt
+insepa_*.pt
+
+# Backup files
+Adam_Lovely_memory_backup_*.json
+Adam_Lovely_inconscious_manual_backup_*.json
+
+# Virtual environment
+venv/
+env/
+ENV/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Streamlit
+.streamlit/
+
+# Logs
+*.log

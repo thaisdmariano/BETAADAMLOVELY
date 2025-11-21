@@ -136,7 +136,10 @@ def normalize(txt: str) -> str:
 
 
 def variar_texto(texto: str, bloco: dict, dominio: str) -> str:
-    """Varia o texto substituindo tokens por suas variações aleatórias baseadas nas vars do inconsciente."""
+    """
+    Varia o texto substituindo tokens por suas variações aleatórias baseadas nas vars do inconsciente.
+    Enhanced: Increased probability of using variations for better data augmentation.
+    """
     tokens = Token(texto)
     inconsciente = st.session_state.inconsciente
     bloco_inco = next((b for b in inconsciente["INCO"][dominio]["Blocos"] if b["Bloco_id"] == str(bloco["bloco_id"])), None)
@@ -153,7 +156,11 @@ def variar_texto(texto: str, bloco: dict, dominio: str) -> str:
             # Filtrar vars válidas (remover "0.0" que é placeholder)
             valid_vars = [v for v in data["vars"] if v != "0.0"]
             if valid_vars and len(valid_vars) > 0:
-                chosen_var = random.choice(valid_vars + [tok])
+                # Enhanced: 70% probability to use a variation, 30% to keep original
+                if random.random() < 0.7:
+                    chosen_var = random.choice(valid_vars)
+                else:
+                    chosen_var = tok
             else:
                 chosen_var = tok
         else:
@@ -179,21 +186,40 @@ def get_variations_for_tokens(im_id: str, bloco_id: int, campo: str, markers: Li
 
 
 def parse_text_reaction(prompt: str, reactions: Set[str]) -> Tuple[str, str]:
+    """
+    Parse user input to separate text from reaction (emoji or short expression).
+    Enhanced: More robust detection of emojis and reactions at various positions.
+    """
     s = prompt.strip()
-    # Try to find reaction at the end
+    if not s:
+        return "", ""
+    
+    # Try to find reaction at the end (most common case)
     words = s.split()
     if words:
         last = words[-1]
-        if len(last) <= 3 or any(ord(c) > 127 for c in last):  # short or non-ascii (emoji)
+        # Enhanced: Check if it's in the known reactions set first (most reliable)
+        # Then check for emoji-like characters (unicode > 255 for better accuracy)
+        # Emojis typically are in ranges U+1F600+ (> 0x1F600)
+        is_emoji = any(ord(c) > 255 for c in last)
+        is_short_reaction = len(last) <= 3 and last in reactions
+        # Accept if: known reaction, emoji, or short known reaction
+        if last in reactions or is_emoji or is_short_reaction:
             txt = ' '.join(words[:-1])
             reac = last
             return txt, reac
-    # Else, use the original logic
+    
+    # Try exact match with known reactions (from longest to shortest to avoid partial matches)
     sorted_reactions = sorted(reactions, key=len, reverse=True)
     for reac in sorted_reactions:
         if reac and s.endswith(reac):
             txt = s[:-len(reac)].rstrip()
             return txt, reac
+        # Also try at the beginning (less common but possible)
+        if reac and s.startswith(reac):
+            txt = s[len(reac):].lstrip()
+            return txt, reac
+    
     return s, ""
 
 
@@ -434,14 +460,49 @@ class InsepaAutoencoder(nn.Module):
 
 
 def alnulu_encode(text: str) -> list[float]:
-    mapa = {'A':1,'B':2,'C':3,'D':4,'E':5,'F':6,'G':7,'H':8,'I':9,'J':-10,'K':11,'L':12,'M':-13,'N':14,'O':15,'P':16,'Q':17,'R':18,'S':19,'T':20,'U':21,'V':-22,'W':23,'X':24,'Y':-25,'Z':26,'0':0,'1':1,'2':2,'3':3,'4':4,'5':5,'6':6,'7':7,'8':8,'9':9,'.':2,'!':3,'?':4,',':1,';':1,':':1,'-':1}
-    equiv = {'Á':'A','À':'A','Â':'A','Ã':'A','Ä':'A','È':'E','Ê':'E','É':'E','Ì':'I','Î':'I','Í':'I','Ó':'O','Ò':'O','Ô':'O','Õ':'O','Ö':'O','Ú':'U','Ù':'U','Û':'U','Ü':'U','Ç':'C','Ñ':'N','4':'A','3':'E','1':'I','0':'O','5':'S','7':'T','2':'Z'}
+    """
+    Encodes text using ALNULU encoding scheme for better pattern recognition.
+    Maps characters to numeric values for neural processing.
+    """
+    # Character to numeric mapping
+    mapa = {
+        'A': 1, 'B': 2, 'C': 3, 'D': 4, 'E': 5, 'F': 6, 'G': 7, 'H': 8, 'I': 9, 'J': -10,
+        'K': 11, 'L': 12, 'M': -13, 'N': 14, 'O': 15, 'P': 16, 'Q': 17, 'R': 18, 'S': 19,
+        'T': 20, 'U': 21, 'V': -22, 'W': 23, 'X': 24, 'Y': -25, 'Z': 26,
+        '0': 0, '1': 1, '2': 2, '3': 3, '4': 4, '5': 5, '6': 6, '7': 7, '8': 8, '9': 9,
+        '.': 2, '!': 3, '?': 4, ',': 1, ';': 1, ':': 1, '-': 1
+    }
+    
+    # Accent and special character equivalents
+    equiv = {
+        'Á': 'A', 'À': 'A', 'Â': 'A', 'Ã': 'A', 'Ä': 'A',
+        'È': 'E', 'Ê': 'E', 'É': 'E',
+        'Ì': 'I', 'Î': 'I', 'Í': 'I',
+        'Ó': 'O', 'Ò': 'O', 'Ô': 'O', 'Õ': 'O', 'Ö': 'O',
+        'Ú': 'U', 'Ù': 'U', 'Û': 'U', 'Ü': 'U',
+        'Ç': 'C', 'Ñ': 'N',
+        '4': 'A', '3': 'E', '1': 'I', '0': 'O', '5': 'S', '7': 'T', '2': 'Z'
+    }
+    
     encoded = [float(mapa.get(equiv.get(char.upper(), char.upper()), 0.0)) for char in text]
     return encoded
 
 
 ## INSEPA_MODEL
 class AdamSegmentado(nn.Module):
+    """
+    Custom transformer-based model for Adam Lovely AI chatbot.
+    
+    Architecture:
+    - Separate embeddings for each field (E, RE, CE, PIDE) with n-gram tokenization
+    - Value embeddings, mother embeddings, and position projections for rich representation
+    - Transformer encoder for processing input sequences
+    - Generative decoder flow with start tokens for each field
+    - Multi-head outputs for texto, emoji, contexto, and position prediction
+    
+    This model learns to map input patterns to appropriate responses while
+    maintaining awareness of context, emotions, and internal reasoning.
+    """
     def __init__(self,
                  nE: int, nRE: int, nCE: int, nPIDE: int,
                  mom_size: int,
@@ -583,6 +644,8 @@ def train(memoria: dict, dominio: str) -> None:
         max_E=ds.max_E, max_RE=ds.max_RE, max_CE=ds.max_CE, max_PIDE=ds.max_PIDE, max_ng=ds.max_ng
     )
     opt = optim.Adam(model.parameters(), lr=LR)
+    # Add learning rate scheduler for faster convergence
+    scheduler = optim.lr_scheduler.ReduceLROnPlateau(opt, mode='min', factor=0.5, patience=3, verbose=False)
     ce = nn.CrossEntropyLoss()
     mse = nn.MSELoss()
 
@@ -591,6 +654,8 @@ def train(memoria: dict, dominio: str) -> None:
     status_text = st.empty()
     for ep in range(1, EPOCHS + 1):
         model.train()
+        epoch_loss = 0.0
+        batch_count = 0
         for x, y in train_ld:
             opt.zero_grad()
             out = model(x)
@@ -602,6 +667,8 @@ def train(memoria: dict, dominio: str) -> None:
             )
             loss.backward()
             opt.step()
+            epoch_loss += loss.item()
+            batch_count += 1
 
         model.eval()
         val_loss = 0.0
@@ -619,6 +686,11 @@ def train(memoria: dict, dominio: str) -> None:
         else:
             val_loss = float("inf")  # sem validação, usar inf para não salvar
 
+        # Update learning rate based on validation loss
+        if val_ld:
+            scheduler.step(val_loss)
+        
+        # Early stopping with improved checkpoint saving
         if prev_val is None or val_loss < best:
             best, wait = val_loss, 0
             torch.save((
@@ -632,10 +704,14 @@ def train(memoria: dict, dominio: str) -> None:
         else:
             wait += 1
             if wait >= PATIENCE:
+                status_text.text(f"⏸️ Early stopping at epoch {ep}/{EPOCHS} (patience reached)")
                 break
         prev_val = val_loss
         progress_bar.progress(ep / EPOCHS)
-        status_text.text(f"Época {ep}/{EPOCHS}, Val Loss: {val_loss:.4f}")
+        # Show both training and validation loss for better monitoring
+        train_loss_avg = epoch_loss / batch_count if batch_count > 0 else 0.0
+        current_lr = opt.param_groups[0]['lr']
+        status_text.text(f"Época {ep}/{EPOCHS}, Train Loss: {train_loss_avg:.4f}, Val Loss: {val_loss:.4f}, LR: {current_lr:.6f}")
 
     st.success(f"✅ Treino concluído. best_val_loss={best:.4f}")
     
@@ -651,6 +727,10 @@ def train(memoria: dict, dominio: str) -> None:
 
 
 def train_autoencoder(memoria: dict, dominio: str) -> None:
+    """
+    Train autoencoder for unsupervised generation of new response blocks.
+    Enhanced: Better training loop with learning rate scheduling and early stopping.
+    """
     blocos = memoria["IM"][dominio]["blocos"]
     encoded_inputs = [alnulu_encode(b["entrada"]["texto"] + b["entrada"].get("reacao", "") + b["entrada"].get("contexto", "")) for b in blocos]
     if not encoded_inputs:
@@ -664,10 +744,15 @@ def train_autoencoder(memoria: dict, dominio: str) -> None:
     input_dim = max_len
     model = InsepaAutoencoder(input_dim=input_dim, latent_dim=LATENT_DIM)
     opt = optim.Adam(model.parameters(), lr=LR)
+    # Add scheduler for better convergence
+    scheduler = optim.lr_scheduler.ReduceLROnPlateau(opt, mode='min', factor=0.5, patience=5, verbose=False)
     mse = nn.MSELoss()
 
     progress_bar = st.progress(0)
     status_text = st.empty()
+    best_loss = float('inf')
+    patience_counter = 0
+    
     for ep in range(1, EPOCHS + 1):
         model.train()
         total_loss = 0.0
@@ -679,11 +764,27 @@ def train_autoencoder(memoria: dict, dominio: str) -> None:
             loss.backward()
             opt.step()
             total_loss += loss.item()
-        status_text.text(f"Época {ep}/{EPOCHS}, Loss: {total_loss:.4f}")
+        
+        avg_loss = total_loss / len(encoded_inputs)
+        scheduler.step(avg_loss)
+        
+        # Early stopping
+        if avg_loss < best_loss:
+            best_loss = avg_loss
+            patience_counter = 0
+            # Save best model
+            torch.save({'state_dict': model.state_dict(), 'input_dim': input_dim, 'latent_dim': LATENT_DIM}, f"autoencoder_{dominio}.pt")
+        else:
+            patience_counter += 1
+            if patience_counter >= PATIENCE:
+                status_text.text(f"⏸️ Early stopping at epoch {ep}/{EPOCHS}")
+                break
+        
+        current_lr = opt.param_groups[0]['lr']
+        status_text.text(f"Época {ep}/{EPOCHS}, Loss: {avg_loss:.4f}, LR: {current_lr:.6f}")
         progress_bar.progress(ep / EPOCHS)
-    # Save autoencoder
-    torch.save({'state_dict': model.state_dict(), 'input_dim': input_dim, 'latent_dim': LATENT_DIM}, f"autoencoder_{dominio}.pt")
-    st.success("Autoencoder treinado!")
+    
+    st.success(f"✅ Autoencoder treinado! Best loss: {best_loss:.4f}")
 
 
 def gerar_bloco_novo_unsupervised(memoria: dict, dominio: str, entrada_texto: str, entrada_reacao: str = "", entrada_contexto: str = "") -> dict:
@@ -1722,7 +1823,10 @@ def infer(memoria: dict, dominio: str) -> None:
 
 
 def weighted_choice(variations, bloco_id, likes=None):
-    """Escolhe uma variação com pesos baseados em likes."""
+    """
+    Escolhe uma variação com pesos baseados em likes.
+    Enhanced: Uses exponential weighting to give stronger preference to liked responses.
+    """
     if likes is None:
         likes = {}
     if bloco_id not in likes:
@@ -1730,7 +1834,11 @@ def weighted_choice(variations, bloco_id, likes=None):
     weights = []
     for var in variations:
         count = likes[bloco_id].get(var, 0)
-        weights.append(max(1, count + 1))  # mínimo 1 para não zerar
+        # Exponential weighting with cap to prevent overflow and extreme bias
+        # Base weight of 1.0, then multiply by (2^count) but cap at 100x
+        # This gives strong preference (2x, 4x, 8x...) but prevents extreme values
+        weight = min(1.0 * (2 ** count), 100.0) if count > 0 else 1.0
+        weights.append(weight)
     return random.choices(variations, weights=weights, k=1)[0]
 
 
