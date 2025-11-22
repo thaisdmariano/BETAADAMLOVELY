@@ -42,11 +42,10 @@ import time
 # CONFIGURAÇÃO DE ARQUIVOS E CONSTANTES
 # ────────────────────────────────────────────────────────────────────────────────
 
-ARQUIVO_MEMORIA = "Adam_Lovely_memory_v2.json"
-ARQUIVO_INCONSCIENTE = "Adam_Lovely_inconscious_v2.json"
+ARQUIVO_MEMORIA = "Adam_Lovely_memory.json"
+ARQUIVO_INCONSCIENTE = "Adam_Lovely_inconscious.json"
 EMBED_DIM = 16
 HIDDEN_DIM = 64
-LATENT_DIM = 128
 PATIENCE = 5
 BATCH_SIZE = 8
 LR = 1e-3
@@ -180,15 +179,6 @@ def get_variations_for_tokens(im_id: str, bloco_id: int, campo: str, markers: Li
 
 def parse_text_reaction(prompt: str, reactions: Set[str]) -> Tuple[str, str]:
     s = prompt.strip()
-    # Try to find reaction at the end
-    words = s.split()
-    if words:
-        last = words[-1]
-        if len(last) <= 3 or any(ord(c) > 127 for c in last):  # short or non-ascii (emoji)
-            txt = ' '.join(words[:-1])
-            reac = last
-            return txt, reac
-    # Else, use the original logic
     sorted_reactions = sorted(reactions, key=len, reverse=True)
     for reac in sorted_reactions:
         if reac and s.endswith(reac):
@@ -421,25 +411,6 @@ class InsepaFieldDataset(Dataset):
         return x_t, y_t
 
 
-class InsepaAutoencoder(nn.Module):
-    def __init__(self, input_dim: int, hidden_dim: int = 64, latent_dim: int = 32):
-        super().__init__()
-        self.encoder = nn.Sequential(nn.Linear(input_dim, hidden_dim), nn.ReLU(), nn.Linear(hidden_dim, latent_dim))
-        self.decoder = nn.Sequential(nn.Linear(latent_dim, hidden_dim), nn.ReLU(), nn.Linear(hidden_dim, input_dim))
-
-    def forward(self, x):
-        latent = self.encoder(x)
-        reconstructed = self.decoder(latent)
-        return reconstructed, latent
-
-
-def alnulu_encode(text: str) -> list[float]:
-    mapa = {'A':1,'B':2,'C':3,'D':4,'E':5,'F':6,'G':7,'H':8,'I':9,'J':-10,'K':11,'L':12,'M':-13,'N':14,'O':15,'P':16,'Q':17,'R':18,'S':19,'T':20,'U':21,'V':-22,'W':23,'X':24,'Y':-25,'Z':26,'0':0,'1':1,'2':2,'3':3,'4':4,'5':5,'6':6,'7':7,'8':8,'9':9,'.':2,'!':3,'?':4,',':1,';':1,':':1,'-':1}
-    equiv = {'Á':'A','À':'A','Â':'A','Ã':'A','Ä':'A','È':'E','Ê':'E','É':'E','Ì':'I','Î':'I','Í':'I','Ó':'O','Ò':'O','Ô':'O','Õ':'O','Ö':'O','Ú':'U','Ù':'U','Û':'U','Ü':'U','Ç':'C','Ñ':'N','4':'A','3':'E','1':'I','0':'O','5':'S','7':'T','2':'Z'}
-    encoded = [float(mapa.get(equiv.get(char.upper(), char.upper()), 0.0)) for char in text]
-    return encoded
-
-
 ## INSEPA_MODEL
 class AdamSegmentado(nn.Module):
     def __init__(self,
@@ -481,22 +452,6 @@ class AdamSegmentado(nn.Module):
             num_layers=1
         )
 
-        # Start tokens for generative decoders
-        self.start_E = nn.Parameter(torch.randn(EMBED_DIM))
-        self.start_RE = nn.Parameter(torch.randn(EMBED_DIM))
-        self.start_CE = nn.Parameter(torch.randn(EMBED_DIM))
-        self.start_PIDE = nn.Parameter(torch.randn(EMBED_DIM))
-
-        # Decoders for generative flow
-        self.decoder_pide = nn.TransformerDecoder(
-            nn.TransformerDecoderLayer(d_model=EMBED_DIM, nhead=4, dim_feedforward=HIDDEN_DIM),
-            num_layers=1
-        )
-        self.decoder_saida = nn.TransformerDecoder(
-            nn.TransformerDecoderLayer(d_model=EMBED_DIM, nhead=4, dim_feedforward=HIDDEN_DIM),
-            num_layers=1
-        )
-
         self.fc1 = nn.Linear(EMBED_DIM, HIDDEN_DIM)
         self.act = nn.ReLU()
 
@@ -533,17 +488,13 @@ class AdamSegmentado(nn.Module):
         ePI_pos = self.proj_PIDEpos(x["PIDE_val"].unsqueeze(-1))
         ePIDE = (ePI_tok + ePI_val + ePI_mom + ePI_pos).mean(dim=1)
 
-        # Encoder
+        # Agrega e classifica
+        # Empilhar embeddings dos campos em sequência
         seq = torch.stack([eE, eRE, eCE, ePIDE], dim=1)  # (batch, 4, EMBED_DIM)
         seq = seq.permute(1, 0, 2)  # (4, batch, EMBED_DIM)
-        encoded = self.transformer(seq)  # (4, batch, EMBED_DIM)
-
-        # Generative decoder flow
-        start_tokens = torch.stack([self.start_E, self.start_RE, self.start_CE, self.start_PIDE], dim=0).unsqueeze(1).repeat(1, batch, 1)  # (4, batch, EMBED_DIM)
-        decoded_pide = self.decoder_pide(start_tokens, encoded)
-        decoded_saida = self.decoder_saida(decoded_pide, encoded)
-
-        h = decoded_saida.permute(1, 0, 2).mean(dim=1)  # (batch, EMBED_DIM)
+        transformed = self.transformer(seq)  # (4, batch, EMBED_DIM)
+        transformed = transformed.permute(1, 0, 2)  # (batch, 4, EMBED_DIM)
+        h = transformed.mean(dim=1)  # (batch, EMBED_DIM)
         h = self.act(self.fc1(h))
         return {
             "texto": self.h_txt(h),
@@ -556,7 +507,7 @@ class AdamSegmentado(nn.Module):
 ## INSEPA_TRAIN
 def train(memoria: dict, dominio: str) -> None:
     # Atualizar inconsciente para o IM selecionado
-    atualizar_inconsciente_para_im(memoria, dominio, st.session_state.inconsciente)
+    atualizar_inconsciente_para_im(memoria, dominio)
 
     ds = InsepaFieldDataset(memoria, dominio)
     n = len(ds)
@@ -639,136 +590,10 @@ def train(memoria: dict, dominio: str) -> None:
 
     st.success(f"✅ Treino concluído. best_val_loss={best:.4f}")
     
-    # Gerar JSON para download em vez de salvar na área de trabalho
-    memoria_json = json.dumps(memoria, ensure_ascii=False, indent=2)
-    st.download_button(
-        label="📥 Baixar Backup do JSON de Memória",
-        data=memoria_json,
-        file_name=f"Adam_Lovely_memory_backup_{dominio}_{int(time.time())}.json",
-        mime="application/json",
-        key=f"download_backup_{dominio}_{int(time.time())}"
-    )
-
-
-def train_autoencoder(memoria: dict, dominio: str) -> None:
-    blocos = memoria["IM"][dominio]["blocos"]
-    encoded_inputs = [alnulu_encode(b["entrada"]["texto"] + b["entrada"].get("reacao", "") + b["entrada"].get("contexto", "")) for b in blocos]
-    if not encoded_inputs:
-        st.error("Nenhum bloco para treinar o autoencoder.")
-        return
-    max_len = max(len(e) for e in encoded_inputs)
-    # Pad all to max_len
-    for e in encoded_inputs:
-        while len(e) < max_len:
-            e.append(0.0)
-    input_dim = max_len
-    model = InsepaAutoencoder(input_dim=input_dim, latent_dim=LATENT_DIM)
-    opt = optim.Adam(model.parameters(), lr=LR)
-    mse = nn.MSELoss()
-
-    progress_bar = st.progress(0)
-    status_text = st.empty()
-    for ep in range(1, EPOCHS + 1):
-        model.train()
-        total_loss = 0.0
-        for encoded in encoded_inputs:
-            opt.zero_grad()
-            input_tensor = torch.tensor(encoded, dtype=torch.float32).unsqueeze(0)
-            reconstructed, _ = model(input_tensor)
-            loss = mse(reconstructed, input_tensor)
-            loss.backward()
-            opt.step()
-            total_loss += loss.item()
-        status_text.text(f"Época {ep}/{EPOCHS}, Loss: {total_loss:.4f}")
-        progress_bar.progress(ep / EPOCHS)
-    # Save autoencoder
-    torch.save({'state_dict': model.state_dict(), 'input_dim': input_dim, 'latent_dim': LATENT_DIM}, f"autoencoder_{dominio}.pt")
-    st.success("Autoencoder treinado!")
-
-
-def gerar_bloco_novo_unsupervised(memoria: dict, dominio: str, entrada_texto: str, entrada_reacao: str = "", entrada_contexto: str = "") -> dict:
-    """Gera um novo bloco baseado em padrões aprendidos pelo autoencoder."""
-    # Load autoencoder
-    try:
-        checkpoint = torch.load(f"autoencoder_{dominio}.pt")
-        model = InsepaAutoencoder(input_dim=checkpoint['input_dim'], latent_dim=checkpoint['latent_dim'])
-        model.load_state_dict(checkpoint['state_dict'])
-        model.eval()
-    except FileNotFoundError:
-        st.info("Treinando autoencoder para geração não supervisionada...")
-        train_autoencoder(memoria, dominio)
-        try:
-            checkpoint = torch.load(f"autoencoder_{dominio}.pt")
-            model = InsepaAutoencoder(input_dim=checkpoint['input_dim'], latent_dim=checkpoint['latent_dim'])
-            model.load_state_dict(checkpoint['state_dict'])
-            model.eval()
-        except FileNotFoundError:
-            st.error("Falha ao treinar autoencoder.")
-            return None
-
-    # Encode input using alnulu
-    encoded_input = alnulu_encode(entrada_texto + entrada_reacao + entrada_contexto)
-    if not encoded_input:
-        return None
-
-    # Pad or truncate to match input_dim
-    if len(encoded_input) > checkpoint['input_dim']:
-        encoded_input = encoded_input[:checkpoint['input_dim']]
-    else:
-        encoded_input += [0.0] * (checkpoint['input_dim'] - len(encoded_input))
-
-    # Get latent representation
-    with torch.no_grad():
-        input_tensor = torch.tensor(encoded_input, dtype=torch.float32).unsqueeze(0)
-        reconstructed, latent = model(input_tensor)
-
-    # Generate new block based on patterns
-    # Use latent to find similar existing blocks and generate variations
-    blocos = memoria["IM"][dominio]["blocos"]
-    if not blocos:
-        return None
-
-    # Find closest block by comparing latents (simplified: use first block as template)
-    template_bloco = blocos[0]
-
-    # Generate new text by varying existing patterns
-    base_texto = template_bloco["saidas"][0]["textos"][0]
-    new_textos = []
-    for i in range(3):  # Generate 3 texts like in templates
-        varied = variar_texto(base_texto, template_bloco, dominio)
-        new_textos.append(varied)
-    
-    new_reacao = template_bloco["saidas"][0].get("reacao", "")
-    new_contexto = template_bloco["saidas"][0].get("contexto", "")
-
-    # Create new block
-    next_id = len(blocos) + 1
-    new_bloco = {
-        "bloco_id": next_id,
-        "entrada": {
-            "texto": entrada_texto,
-            "reacao": entrada_reacao,
-            "contexto": entrada_contexto,
-            "pensamento_interno": "",
-            "tokens": {},
-            "fim": "",
-            "alnulu": len(entrada_texto)
-        },
-        "saidas": [{
-            "textos": new_textos,
-            "reacao": new_reacao,
-            "contexto": new_contexto,
-            "tokens": {},
-            "fim": ""
-        }],
-        "open": True
-    }
-
-    # Add to memory
-    blocos.append(new_bloco)
-    salvar_json(ARQUIVO_MEMORIA, memoria)
-
-    return new_bloco
+    # Salvar backup do JSON usado para treinamento
+    backup_memoria = f"Adam_Lovely_memory_backup_{dominio}_{int(time.time())}.json"
+    salvar_json(backup_memoria, memoria)
+    st.info(f"📁 Backup do JSON salvo como: {backup_memoria}")
 
 
 def generate_insight(bloco, chosen=None):
@@ -783,11 +608,6 @@ def generate_insight(bloco, chosen=None):
     return None
 
 
-def generate_pide_insight(txt: str, reac: str, ctx_new: str) -> str:
-    """Gera PIDE automático baseado em insight preliminar."""
-    return f"Recebi '{txt}' com reação '{reac}' no contexto '{ctx_new}'. Preciso pensar sobre como responder adequadamente. Vou analisar a situação e formular uma resposta apropriada."
-
-
 def infer(memoria: dict, dominio: str) -> None:
     """
     Interface de chat inovadora para inferência.
@@ -796,7 +616,7 @@ def infer(memoria: dict, dominio: str) -> None:
     # parse_text_reaction, normalize, ckpt_path, train, AdamSegmentado já disponíveis
 
     # Atualizar inconsciente para o IM selecionado
-    atualizar_inconsciente_para_im(memoria, dominio, st.session_state.inconsciente)
+    atualizar_inconsciente_para_im(memoria, dominio)
 
     ckpt = ckpt_path(dominio)
     if not os.path.exists(ckpt):
@@ -964,438 +784,265 @@ def infer(memoria: dict, dominio: str) -> None:
         # Parse entrada normal
         txt, reac = parse_text_reaction(prompt, all_possible_reactions)
         bloco = None
-        # Strict matching: exact Text + Reaction
         for b in blocos:
-            if b["entrada"]["texto"] == txt and b["entrada"].get("reacao") == reac:
+            # Verificar Multivars_Entrada primeiro (frases completas)
+            if txt in b["entrada"].get("Multivars_Entrada", []):
+                bloco = b
+                break
+            # Matching por tokens e vars
+            txt_variations = get_variations_for_tokens(dominio, b["bloco_id"], "Entrada", b["entrada"]["tokens"]["E"])
+            reac_variations = get_variations_for_tokens(dominio, b["bloco_id"], "Entrada", b["entrada"]["tokens"].get("RE", []))
+            txt_tokens = Token(txt)
+            if all(normalize(t) in txt_variations for t in txt_tokens) and (not b["entrada"]["tokens"].get("RE") or (reac and normalize(reac) in reac_variations)):
                 bloco = b
                 break
         if bloco is None:
-            # Interactive mode for new block
-            st.session_state.messages.append({"role": "assistant", "content": "Hmm, isso é completamente novo para mim. Vamos criar uma nova expressão juntos!"})
-            with st.chat_message("assistant"):
-                st.markdown("Hmm, isso é completamente novo para mim. Vamos criar uma nova expressão juntos!")
-            
-            # Pre-fill new block with placeholders
-            novo_bloco = {
-                "bloco_id": 0,  # Will be set later
-                "entrada": {
-                    "texto": txt,
-                    "reacao": reac,
-                    "contexto": "0.0",  # Placeholder
-                    "pensamento_interno": "0.0",  # Placeholder
-                    "tokens": {},
-                    "fim": "",
-                    "alnulu": len(txt)
-                },
-                "saidas": [{
-                    "textos": [],  # Will be generated
-                    "reacao": reac,
-                    "contexto": "0.0",  # Placeholder
-                    "tokens": {},
-                    "fim": ""
-                }],
-                "open": True
-            }
-            
-            # Passo 1: Perguntar Contexto
-            with st.form("form_contexto"):
-                st.write("Qual é o contexto dessa mensagem?")
-                contexto_input = st.text_input("Contexto:", key="contexto_new")
-                submitted_contexto = st.form_submit_button("Confirmar Contexto")
-                if submitted_contexto and contexto_input.strip():
-                    st.session_state.contexto = contexto_input.strip()
-                    st.rerun()  # Só rerun após sucesso
-            
-            # Só mostre o próximo se contexto confirmado
-            if "contexto" in st.session_state:
-                # Passo 2: PIDE automático + Edição
-                with st.form("form_pide"):
-                    pide_prelim = generate_pide_insight(txt, reac, st.session_state.contexto)
-                    st.write("O quê o Adam deveria pensar sobre isso?")
-                    pide_input = st.text_area("PIDE:", value=pide_prelim, key="pide_new", height=100)
-                    submitted_pide = st.form_submit_button("Confirmar PIDE")
-                    if submitted_pide and pide_input.strip():
-                        st.session_state.pide = pide_input.strip()
-                        st.rerun()
-            
-            # Só mostre o próximo se PIDE confirmado
-            if "pide" in st.session_state:
-                # Passo 3: Busca similares e gera saídas
-                # (Código de busca ALNULU + geração como antes)
-                st.write("Buscando similares e gerando saídas...")
-                
-                # Buscar blocos similares usando ALNULU embeddings
-                def alnulu_encode(text: str) -> list:
-                    """Simula encoding ALNULU baseado em tokens."""
-                    tokens = Token(text)
-                    # Simples: vetor de frequências de tokens únicos
-                    unique_tokens = set(tokens)
-                    return list(unique_tokens)
-                
-                def cosine_similarity(vec1: list, vec2: list) -> float:
-                    """Similaridade baseada em interseção de tokens."""
-                    set1 = set(vec1)
-                    set2 = set(vec2)
-                    intersection = len(set1 & set2)
-                    union = len(set1 | set2)
-                    return intersection / union if union > 0 else 0.0
-                
-                # Codificar entrada atual
-                entrada_atual = f"{txt} {reac} {st.session_state.contexto} {st.session_state.pide}"
-                encoded_input = alnulu_encode(entrada_atual)
-                
-                # Buscar blocos similares
-                similares = []
-                blocos = memoria["IM"][dominio]["blocos"]
-                for b in blocos:
-                    bloco_texto = f"{b['entrada']['texto']} {b['entrada']['reacao']} {b['entrada']['contexto']} {b['entrada']['pensamento_interno']}"
-                    encoded_bloco = alnulu_encode(bloco_texto)
-                    similaridade = cosine_similarity(encoded_input, encoded_bloco)
-                    if similaridade > 0.3:  # Threshold ajustável
-                        similares.append((b, similaridade))
-                
-                # Ordenar por similaridade
-                similares.sort(key=lambda x: x[1], reverse=True)
-                similares = similares[:3]  # Top 3
-                
-                # Gerar saídas baseadas em similares
-                saidas_geradas = []
-                if similares:
-                    st.write(f"Encontrei {len(similares)} blocos similares. Gerando variações...")
-                    for sim_bloco, sim_score in similares:
-                        for saida in sim_bloco["saidas"][0]["textos"]:
-                            varied = variar_texto(saida, sim_bloco, dominio)
-                            saidas_geradas.append(varied)
-                    # Remover duplicatas
-                    saidas_geradas = list(set(saidas_geradas))
-                else:
-                    st.write("Nenhum bloco similar encontrado. Usando geração unsupervised...")
-                
-                # Fallback para geração unsupervised se poucas saídas
-                if len(saidas_geradas) < 3:
-                    bloco_generated = gerar_bloco_novo_unsupervised(memoria, dominio, txt, reac, st.session_state.contexto)
-                    if bloco_generated:
-                        saidas_geradas.extend(bloco_generated["saidas"][0]["textos"])
-                    else:
-                        saidas_geradas.append("Desculpe, não consegui gerar uma resposta.")
-                
-                novo_bloco["saidas"][0]["textos"] = saidas_geradas[:5]  # Limitar a 5
-                st.session_state.saidas_geradas = saidas_geradas[:5]
-                
-                # Passo 4: Aprovação
-                with st.form("form_aprovacao"):
-                    st.write("Opções geradas:")
-                    for i, saida in enumerate(st.session_state.saidas_geradas):
-                        if st.checkbox(f"Aprovar: {saida}", key=f"approve_{i}"):
-                            # Criar bloco
-                            universo = memoria["IM"][dominio]
-                            blocos = universo["blocos"]
-                            next_id = len(blocos) + 1
-                            novo_bloco["bloco_id"] = next_id
-                            
-                            # Setar valores do session_state
-                            novo_bloco["entrada"]["contexto"] = st.session_state.contexto
-                            novo_bloco["saidas"][0]["contexto"] = st.session_state.contexto
-                            novo_bloco["entrada"]["pensamento_interno"] = st.session_state.pide
-                            
-                            # Tokenize and set markers
-                            current_last = universo["ultimo_child"]
-                            E = Token(txt)
-                            RE = [reac] if reac else []
-                            CE = Token(st.session_state.contexto)
-                            pensamento_limpo = st.session_state.pide.strip('"')
-                            partes = pensamento_limpo.split('.')[:3]
-                            PIDE_full = []
-                            for parte in partes:
-                                PIDE_full.extend(Token(parte.strip()))
-                            PIDE_limited = PIDE_full[:3]
-                            S = Token(saida)
-                            RS = [reac] if reac else []
-                            CS = Token(st.session_state.contexto)
-                            entrada_tokens = E + RE + CE + PIDE_full
-                            saida_tokens = S + RS + CS
-                            ent_marks_inco = generate_markers(current_last, len(entrada_tokens))
-                            out_marks = generate_markers(ent_marks_inco[-1], len(saida_tokens))
-                            fim_ent = ent_marks_inco[-1]
-                            fim_out = out_marks[-1]
-                            ent_marks = ent_marks_inco[:len(E) + len(RE) + len(CE) + len(PIDE_limited)]
-                            idx = 0
-                            E_m = ent_marks[idx: idx + len(E)]; idx += len(E)
-                            RE_m = ent_marks[idx: idx + len(RE)]; idx += len(RE)
-                            CE_m = ent_marks[idx: idx + len(CE)]; idx += len(CE)
-                            PIDE_m = ent_marks[idx: idx + len(PIDE_limited)]
-                            jdx = 0
-                            S_m = out_marks[jdx: jdx + len(S)]; jdx += len(S)
-                            RS_m = out_marks[jdx: jdx + len(RS)]; jdx += len(RS)
-                            CS_m = out_marks[jdx: jdx + len(CS)]
-                            novo_bloco["entrada"]["tokens"] = {
-                                "E": E_m,
-                                "RE": RE_m,
-                                "CE": CE_m,
-                                "PIDE": PIDE_m,
-                                "TOTAL": ent_marks_inco
-                            }
-                            novo_bloco["entrada"]["fim"] = fim_ent
-                            novo_bloco["saidas"][0]["tokens"] = {
-                                "S": S_m,
-                                "RS": RS_m,
-                                "CS": CS_m,
-                                "TOTAL": out_marks
-                            }
-                            novo_bloco["saidas"][0]["fim"] = fim_out
-                            universo["ultimo_child"] = fim_out
-                            blocos.append(novo_bloco)
-                            salvar_json(ARQUIVO_MEMORIA, memoria)
-                            
-                            # Add to inconsciente
-                            inconsciente = st.session_state.inconsciente
-                            bloco_data = {
-                                "Bloco_id": str(next_id),
-                                "Entrada": {m: {"token": t, "vars": ["0.0"]} for m, t in zip(ent_marks_inco, entrada_tokens)},
-                                "SAÍDA": {m: {"token": t, "vars": ["0.0"]} for m, t in zip(out_marks, saida_tokens)}
-                            }
-                            if dominio in inconsciente.get("INCO", {}):
-                                inconsciente["INCO"][dominio]["Blocos"].append(bloco_data)
-                                inconsciente["INCO"][dominio]["Ultimo child"] = fim_out
-                            else:
-                                inconsciente.setdefault("INCO", {})[dominio] = {
-                                    "NOME": universo["nome"],
-                                    "Ultimo child": fim_out,
-                                    "Blocos": [bloco_data]
-                                }
-                            salvar_json(ARQUIVO_INCONSCIENTE, inconsciente)
-                            st.success("Novo bloco criado com sucesso!")
-                            # Limpar session_state
-                            del st.session_state.contexto, st.session_state.pide, st.session_state.saidas_geradas
-                    submitted_aprovacao = st.form_submit_button("Finalizar")
-                    if submitted_aprovacao:
-                        st.rerun()
-        else:
-            # bloco found, proceed with normal response
-            if bloco and bloco not in st.session_state.conversa_blocos:
-                st.session_state.conversa_blocos.append(bloco)
+            # Verificar se o texto matching mas a reação não
+            for b in blocos:
+                txt_variations = get_variations_for_tokens(dominio, b["bloco_id"], "Entrada", b["entrada"]["tokens"]["E"])
+                if all(normalize(t) in txt_variations for t in txt_tokens):
+                    # Texto matching, mas reação não
+                    st.session_state.messages.append({"role": "assistant", "content": "Hmm parece que falta emoção em sua expressão. Por favor verifique seu emoji."})
+                    with st.chat_message("assistant"):
+                        st.markdown("Hmm parece que falta emoção em sua expressão. Por favor verifique seu emoji.")
+                    st.rerun()
+            # Se não encontrou nem texto, tentar histórico ou erro
+            if st.session_state.conversa_blocos:
+                bloco = st.session_state.conversa_blocos[-1]
+                st.session_state.messages.append({"role": "assistant", "content": f"💭 Continuando do bloco {bloco['bloco_id']}..."})
+                with st.chat_message("assistant"):
+                    st.markdown(f"💭 Continuando do bloco {bloco['bloco_id']}...")
+            else:
+                error_msg = "Desculpe mas seu texto e emoji não existem neste universo. Por favor verifique sua mensagem e tente novamente."
+                st.session_state.messages.append({"role": "assistant", "content": error_msg})
+                with st.chat_message("assistant"):
+                    st.markdown(error_msg)
+                st.session_state.last_valid = False
+                st.rerun()
+
+        # Adicionar bloco ao histórico se for novo
+        if bloco and bloco not in st.session_state.conversa_blocos:
+            st.session_state.conversa_blocos.append(bloco)
 
         st.session_state.current_bloco = bloco
         st.session_state.variation = 0
         st.session_state.last_valid = True
 
         # Gerar Insight se condições atendidas
-        if st.session_state.current_bloco:
-            insight = generate_insight(st.session_state.current_bloco)
-            if insight:
-                st.write(insight)
+        insight = generate_insight(st.session_state.current_bloco)
+        if insight:
+            st.write(insight)
 
-        if bloco:
-            # Preparo e forward
-            max_val = ultimo_child_per_block.get(bloco["bloco_id"], 0.50)
-            E_ids, E_val_idxs, E_val, E_mom, E_pos = featurize("E", bloco, maxE, vE, val_to_idx_E, max_ng)
-            RE_ids, RE_val_idxs, RE_val, RE_mom, RE_pos = featurize("RE", bloco, maxRE, vRE, val_to_idx_RE, max_ng)
-            CE_ids, CE_val_idxs, CE_val, CE_mom, CE_pos = featurize("CE", bloco, maxCE, vCE, val_to_idx_CE, max_ng)
-            PI_ids, PI_val_idxs, PI_val, PI_mom, PI_pos = featurize("PIDE", bloco, maxPIDE, vPIDE, val_to_idx_PIDE, max_ng)
+        # Preparo e forward
+        max_val = ultimo_child_per_block.get(bloco["bloco_id"], 0.50)
+        E_ids, E_val_idxs, E_val, E_mom, E_pos = featurize("E", bloco, maxE, vE, val_to_idx_E, max_ng)
+        RE_ids, RE_val_idxs, RE_val, RE_mom, RE_pos = featurize("RE", bloco, maxRE, vRE, val_to_idx_RE, max_ng)
+        CE_ids, CE_val_idxs, CE_val, CE_mom, CE_pos = featurize("CE", bloco, maxCE, vCE, val_to_idx_CE, max_ng)
+        PI_ids, PI_val_idxs, PI_val, PI_mom, PI_pos = featurize("PIDE", bloco, maxPIDE, vPIDE, val_to_idx_PIDE, max_ng)
 
-            x = {
-                "E": E_ids, "E_val": E_val, "E_mom": E_mom, "E_pos": E_pos, "E_val_idx": E_val_idxs,
-                "RE": RE_ids, "RE_val": RE_val, "RE_mom": RE_mom, "RE_pos": RE_pos, "RE_val_idx": RE_val_idxs,
-                "CE": CE_ids, "CE_val": CE_val, "CE_mom": CE_mom, "CE_pos": CE_pos, "CE_val_idx": CE_val_idxs,
-                "PIDE": PI_ids, "PIDE_val": PI_val, "PIDE_mom": PI_mom, "PIDE_pos": PI_pos, "PIDE_val_idx": PI_val_idxs,
-            }
+        x = {
+            "E": E_ids, "E_val": E_val, "E_mom": E_mom, "E_pos": E_pos, "E_val_idx": E_val_idxs,
+            "RE": RE_ids, "RE_val": RE_val, "RE_mom": RE_mom, "RE_pos": RE_pos, "RE_val_idx": RE_val_idxs,
+            "CE": CE_ids, "CE_val": CE_val, "CE_mom": CE_mom, "CE_pos": CE_pos, "CE_val_idx": CE_val_idxs,
+            "PIDE": PI_ids, "PIDE_val": PI_val, "PIDE_mom": PI_mom, "PIDE_pos": PI_pos, "PIDE_val_idx": PI_val_idxs,
+        }
 
-            with torch.no_grad():
-                out = model(x)
+        with torch.no_grad():
+            out = model(x)
 
-            texts = bloco["saidas"][0]["textos"]
-            emoji = bloco["saidas"][0].get("reacao", "")
-            # Gerar variações para cada texto, sem misturar textos
-            all_variations = []
-            for txt in texts:
-                variations = [txt]  # Sempre incluir o original
-                # Adicionar variações do inconsciente se existirem
-                bloco_inco = next((b for b in inconsciente["INCO"][dominio]["Blocos"] if b["Bloco_id"] == str(bloco["bloco_id"])), None)
-                if bloco_inco:
-                    for marker, data in bloco_inco["SAÍDA"].items():
-                        if data["token"] in txt:
-                            # Adicionar vars válidas (remover "0.0" que é placeholder)
-                            valid_vars = [v for v in data["vars"] if v != "0.0"]
-                            for var in valid_vars:
-                                # Substituir o token no texto pela var
-                                varied_txt = txt.replace(data["token"], var)
-                                variations.append(varied_txt)
-                all_variations.extend(variations)  # Adicionar variações deste texto
-            
-            # Adicionar Multivars_Saída
-            multivars_saida = bloco["saidas"][0].get("Multivars_Saída", [])
-            all_variations.extend(multivars_saida)
-            
-            # Escolher uma variação aleatoriamente com pesos
-            bloco_id = str(bloco["bloco_id"])
-            chosen = weighted_choice(all_variations, bloco_id, st.session_state.likes)
-            
-            chosen = variar_texto(chosen, bloco, dominio)
-            
-            response = f"{chosen} {emoji}"
-            st.session_state.messages.append({"role": "assistant", "content": response})
-            with st.chat_message("assistant"):
-                st.markdown(response)
-            # Armazenar a última resposta para like
-            st.session_state.last_response = chosen
-            st.session_state.last_bloco_id = str(bloco["bloco_id"])
-            # Armazenar a última resposta para like
-            st.session_state.last_response = chosen
-            st.session_state.last_bloco_id = str(bloco["bloco_id"])
-            # Generate speech - sistema otimizado: Edge TTS para vozes premium, gTTS para leves, pyttsx3 para outras
-            if TTS_AVAILABLE:
-                try:
-                    if voz and voz.startswith('edge-') and EDGE_TTS_AVAILABLE:
-                        # Usar Edge TTS para vozes premium do Microsoft Edge
-                        voice_name = voz.split('-', 1)[1]
-                        
-                        # Mapeamento de códigos de voz simplificados para vozes Edge TTS
-                        
-                        # Vozes Femininas
-                        edge_voice_map_female = {
-                            'pt-br': 'pt-BR-FranciscaNeural',  # Feminina
-                            'pt-pt': 'pt-PT-RaquelNeural',     # Feminina
-                            'en': 'en-US-AriaNeural',          # Feminina
-                            'en-us': 'en-US-AriaNeural',       # Feminina
-                            'en-gb': 'en-GB-SoniaNeural',      # Feminina
-                            'es': 'es-ES-ElviraNeural',        # Feminina
-                            'es-us': 'es-US-PalomaNeural',     # Feminina
-                            'fr': 'fr-FR-DeniseNeural',        # Feminina
-                            'de': 'de-DE-KatjaNeural',         # Feminina
-                            'it': 'it-IT-ElsaNeural',          # Feminina
-                            'ja': 'ja-JP-NanamiNeural',        # Feminina
-                            'ko': 'ko-KR-SunHiNeural',         # Feminina
-                            'ru': 'ru-RU-SvetlanaNeural',      # Feminina
-                            'ar': 'ar-SA-ZariyahNeural',       # Feminina
-                            'hi': 'hi-IN-SwaraNeural',         # Feminina
-                            'female': 'en-US-AriaNeural',      # Feminina
-                        }
-                        
-                        # Vozes Masculinas
-                        edge_voice_map_male = {
-                            'pt-br-male': 'pt-BR-AntonioNeural',    # Masculina
-                            'en-male': 'en-US-AndrewNeural',        # Masculina
-                            'es-male': 'es-ES-AlvaroNeural',        # Masculina
-                            'fr-male': 'fr-FR-HenriNeural',         # Masculina
-                            'de-male': 'de-DE-ConradNeural',        # Masculina
-                            'it-male': 'it-IT-DiegoNeural',         # Masculina
-                            'ja-male': 'ja-JP-KeitaNeural',         # Masculina
-                            'ko-male': 'ko-KR-InJoonNeural',        # Masculina
-                            'ru-male': 'ru-RU-DmitryNeural',        # Masculina
-                            'ar-male': 'ar-SA-HamedNeural',         # Masculina
-                            'hi-male': 'hi-IN-MadhurNeural',        # Masculina
-                            'male': 'en-US-ZiraNeural',             # Masculina (nota: Zira é feminino, mas usado como padrão masculino)
-                        }
-                        
-                        # Combinar dicionários
-                        edge_voice_map = {**edge_voice_map_female, **edge_voice_map_male}
-                        
-                        selected_voice = edge_voice_map.get(voice_name, 'en-US-AriaNeural')
-                        
-                        import asyncio
+        texts = bloco["saidas"][0]["textos"]
+        emoji = bloco["saidas"][0].get("reacao", "")
+        # Gerar variações para cada texto, sem misturar textos
+        all_variations = []
+        for txt in texts:
+            variations = [txt]  # Sempre incluir o original
+            # Adicionar variações do inconsciente se existirem
+            bloco_inco = next((b for b in inconsciente["INCO"][dominio]["Blocos"] if b["Bloco_id"] == str(bloco["bloco_id"])), None)
+            if bloco_inco:
+                for marker, data in bloco_inco["SAÍDA"].items():
+                    if data["token"] in txt:
+                        # Adicionar vars válidas (remover "0.0" que é placeholder)
+                        valid_vars = [v for v in data["vars"] if v != "0.0"]
+                        for var in valid_vars:
+                            # Substituir o token no texto pela var
+                            varied_txt = txt.replace(data["token"], var)
+                            variations.append(varied_txt)
+            all_variations.extend(variations)  # Adicionar variações deste texto
+        
+        # Adicionar Multivars_Saída
+        multivars_saida = bloco["saidas"][0].get("Multivars_Saída", [])
+        all_variations.extend(multivars_saida)
+        
+        # Escolher uma variação aleatoriamente com pesos
+        bloco_id = str(bloco["bloco_id"])
+        chosen = weighted_choice(all_variations, bloco_id)
+        
+        chosen = variar_texto(chosen, bloco, dominio)
+        
+        response = f"{chosen} {emoji}"
+        st.session_state.messages.append({"role": "assistant", "content": response})
+        with st.chat_message("assistant"):
+            st.markdown(response)
+        # Armazenar a última resposta para like
+        st.session_state.last_response = chosen
+        st.session_state.last_bloco_id = str(bloco["bloco_id"])
+        # Armazenar a última resposta para like
+        st.session_state.last_response = chosen
+        st.session_state.last_bloco_id = str(bloco["bloco_id"])
+        # Generate speech - sistema otimizado: Edge TTS para vozes premium, gTTS para leves, pyttsx3 para outras
+        if TTS_AVAILABLE:
+            try:
+                if voz and voz.startswith('edge-') and EDGE_TTS_AVAILABLE:
+                    # Usar Edge TTS para vozes premium do Microsoft Edge
+                    voice_name = voz.split('-', 1)[1]
+                    
+                    # Mapeamento de códigos de voz simplificados para vozes Edge TTS
+                    
+                    # Vozes Femininas
+                    edge_voice_map_female = {
+                        'pt-br': 'pt-BR-FranciscaNeural',  # Feminina
+                        'pt-pt': 'pt-PT-RaquelNeural',     # Feminina
+                        'en': 'en-US-AriaNeural',          # Feminina
+                        'en-us': 'en-US-AriaNeural',       # Feminina
+                        'en-gb': 'en-GB-SoniaNeural',      # Feminina
+                        'es': 'es-ES-ElviraNeural',        # Feminina
+                        'es-us': 'es-US-PalomaNeural',     # Feminina
+                        'fr': 'fr-FR-DeniseNeural',        # Feminina
+                        'de': 'de-DE-KatjaNeural',         # Feminina
+                        'it': 'it-IT-ElsaNeural',          # Feminina
+                        'ja': 'ja-JP-NanamiNeural',        # Feminina
+                        'ko': 'ko-KR-SunHiNeural',         # Feminina
+                        'ru': 'ru-RU-SvetlanaNeural',      # Feminina
+                        'ar': 'ar-SA-ZariyahNeural',       # Feminina
+                        'hi': 'hi-IN-SwaraNeural',         # Feminina
+                        'female': 'en-US-AriaNeural',      # Feminina
+                    }
+                    
+                    # Vozes Masculinas
+                    edge_voice_map_male = {
+                        'pt-br-male': 'pt-BR-AntonioNeural',    # Masculina
+                        'en-male': 'en-US-AndrewNeural',        # Masculina
+                        'es-male': 'es-ES-AlvaroNeural',        # Masculina
+                        'fr-male': 'fr-FR-HenriNeural',         # Masculina
+                        'de-male': 'de-DE-ConradNeural',        # Masculina
+                        'it-male': 'it-IT-DiegoNeural',         # Masculina
+                        'ja-male': 'ja-JP-KeitaNeural',         # Masculina
+                        'ko-male': 'ko-KR-InJoonNeural',        # Masculina
+                        'ru-male': 'ru-RU-DmitryNeural',        # Masculina
+                        'ar-male': 'ar-SA-HamedNeural',         # Masculina
+                        'hi-male': 'hi-IN-MadhurNeural',        # Masculina
+                        'male': 'en-US-ZiraNeural',             # Masculina (nota: Zira é feminino, mas usado como padrão masculino)
+                    }
+                    
+                    # Combinar dicionários
+                    edge_voice_map = {**edge_voice_map_female, **edge_voice_map_male}
+                    
+                    selected_voice = edge_voice_map.get(voice_name, 'en-US-AriaNeural')
+                    
+                    import asyncio
+                    import io
+                    
+                    async def generate_edge_audio():
+                        communicate = edge_tts.Communicate(chosen, selected_voice)
+                        audio_data = b""
+                        async for chunk in communicate.stream():
+                            if chunk["type"] == "audio":
+                                audio_data += chunk["data"]
+                        return audio_data
+                    
+                    # Executar de forma síncrona
+                    audio_bytes = asyncio.run(generate_edge_audio())
+                    
+                    if audio_bytes and len(audio_bytes) > 0:
+                        # Armazenar em session_state e reproduzir diretamente
+                        st.session_state.last_audio = audio_bytes
+                        st.audio(st.session_state.last_audio, format='audio/mp3')
+                        st.success(f"🎵 Áudio gerado com Edge TTS '{selected_voice}': {len(audio_bytes)} bytes")
+                    else:
+                        st.error("❌ Falha ao gerar arquivo de áudio com Edge TTS.")
+                elif voz and voz.startswith('gtts-') and GTTS_AVAILABLE:
+                    lang_code = voz.split('-', 1)[1]
+                    
+                    # Mapear códigos de idioma do gTTS
+                    lang_map = {
+                        'pt-br': 'pt-br',
+                        'pt-pt': 'pt-pt', 
+                        'en': 'en',
+                        'en-us': 'en',
+                        'en-gb': 'en',
+                        'es': 'es',
+                        'es-us': 'es',
+                        'fr': 'fr',
+                        'de': 'de',
+                        'it': 'it',
+                        'ja': 'ja',
+                        'ko': 'ko',
+                        'ru': 'ru',
+                        'ar': 'ar',
+                        'hi': 'hi'
+                    }
+                    
+                    if lang_code in lang_map:
+                        from gtts import gTTS
                         import io
                         
-                        async def generate_edge_audio():
-                            communicate = edge_tts.Communicate(chosen, selected_voice)
-                            audio_data = b""
-                            async for chunk in communicate.stream():
-                                if chunk["type"] == "audio":
-                                    audio_data += chunk["data"]
-                            return audio_data
+                        # Gerar áudio com gTTS
+                        tts = gTTS(text=chosen, lang=lang_map[lang_code], slow=False)
                         
-                        # Executar de forma síncrona
-                        audio_bytes = asyncio.run(generate_edge_audio())
+                        # Salvar em buffer de memória
+                        audio_buffer = io.BytesIO()
+                        tts.write_to_fp(audio_buffer)
+                        audio_buffer.seek(0)
+                        audio_bytes = audio_buffer.read()
                         
                         if audio_bytes and len(audio_bytes) > 0:
                             # Armazenar em session_state e reproduzir diretamente
                             st.session_state.last_audio = audio_bytes
                             st.audio(st.session_state.last_audio, format='audio/mp3')
-                            st.success(f"🎵 Áudio gerado com Edge TTS '{selected_voice}': {len(audio_bytes)} bytes")
+                            st.success(f"🎵 Áudio gerado com gTTS '{lang_code}': {len(audio_bytes)} bytes")
                         else:
-                            st.error("❌ Falha ao gerar arquivo de áudio com Edge TTS.")
-                    elif voz and voz.startswith('gtts-') and GTTS_AVAILABLE:
-                        lang_code = voz.split('-', 1)[1]
-                        
-                        # Mapear códigos de idioma do gTTS
-                        lang_map = {
-                            'pt-br': 'pt-br',
-                            'pt-pt': 'pt-pt', 
-                            'en': 'en',
-                            'en-us': 'en',
-                            'en-gb': 'en',
-                            'es': 'es',
-                            'es-us': 'es',
-                            'fr': 'fr',
-                            'de': 'de',
-                            'it': 'it',
-                            'ja': 'ja',
-                            'ko': 'ko',
-                            'ru': 'ru',
-                            'ar': 'ar',
-                            'hi': 'hi'
-                        }
-                        
-                        if lang_code in lang_map:
-                            from gtts import gTTS
-                            import io
-                            
-                            # Gerar áudio com gTTS
-                            tts = gTTS(text=chosen, lang=lang_map[lang_code], slow=False)
-                            
-                            # Salvar em buffer de memória
-                            audio_buffer = io.BytesIO()
-                            tts.write_to_fp(audio_buffer)
-                            audio_buffer.seek(0)
-                            audio_bytes = audio_buffer.read()
-                            
-                            if audio_bytes and len(audio_bytes) > 0:
-                                # Armazenar em session_state e reproduzir diretamente
-                                st.session_state.last_audio = audio_bytes
-                                st.audio(st.session_state.last_audio, format='audio/mp3')
-                                st.success(f"🎵 Áudio gerado com gTTS '{lang_code}': {len(audio_bytes)} bytes")
-                            else:
-                                st.error("❌ Falha ao gerar arquivo de áudio com gTTS.")
-                        else:
-                            st.warning(f"Idioma '{lang_code}' não suportado pelo gTTS.")
+                            st.error("❌ Falha ao gerar arquivo de áudio com gTTS.")
                     else:
-                        # Usar pyttsx3 para vozes automáticas ou quando gTTS não disponível
-                        import pyttsx3
-                        engine = pyttsx3.init()
+                        st.warning(f"Idioma '{lang_code}' não suportado pelo gTTS.")
+                else:
+                    # Usar pyttsx3 para vozes automáticas ou quando gTTS não disponível
+                    import pyttsx3
+                    engine = pyttsx3.init()
 
-                        # Configurar voz baseada no gênero do IM
-                        voices = engine.getProperty('voices')
-                        if voz:
-                            # Se uma voz específica foi selecionada, tentar usar ela
-                            selected_voice = next((v for v in voices if v.name == voz), voices[0] if voices else None)
+                    # Configurar voz baseada no gênero do IM
+                    voices = engine.getProperty('voices')
+                    if voz:
+                        # Se uma voz específica foi selecionada, tentar usar ela
+                        selected_voice = next((v for v in voices if v.name == voz), voices[0] if voices else None)
+                    else:
+                        # Seleção automática baseada no gênero
+                        if genero == "masculino":
+                            selected_voice = next((v for v in voices if any(k in v.name.lower() for k in ['david', 'mark', 'male', 'paul', 'george'])), voices[0] if voices else None)
+                        elif genero == "feminino":
+                            selected_voice = next((v for v in voices if any(k in v.name.lower() for k in ['maria', 'zira', 'hazel', 'female', 'anna', 'linda'])), voices[0] if voices else None)
                         else:
-                            # Seleção automática baseada no gênero
-                            if genero == "masculino":
-                                selected_voice = next((v for v in voices if any(k in v.name.lower() for k in ['david', 'mark', 'male', 'paul', 'george'])), voices[0] if voices else None)
-                            elif genero == "feminino":
-                                selected_voice = next((v for v in voices if any(k in v.name.lower() for k in ['maria', 'zira', 'hazel', 'female', 'anna', 'linda'])), voices[0] if voices else None)
-                            else:
-                                selected_voice = random.choice(voices) if voices else None
+                            selected_voice = random.choice(voices) if voices else None
 
-                        if selected_voice:
-                            engine.setProperty('voice', selected_voice.id)
-                            engine.setProperty('rate', 180)  # Velocidade um pouco mais rápida
-                            engine.setProperty('volume', 0.9)  # Volume alto
+                    if selected_voice:
+                        engine.setProperty('voice', selected_voice.id)
+                        engine.setProperty('rate', 180)  # Velocidade um pouco mais rápida
+                        engine.setProperty('volume', 0.9)  # Volume alto
 
-                            # Reproduzir diretamente sem salvar arquivo
-                            engine.say(chosen)
-                            engine.runAndWait()
+                        # Reproduzir diretamente sem salvar arquivo
+                        engine.say(chosen)
+                        engine.runAndWait()
 
-                            st.success(f"🎵 Áudio reproduzido com sucesso! (Voz: {selected_voice.name})")
-                        else:
-                            st.warning("⚠️ Nenhuma voz do sistema encontrada. TTS pode não funcionar corretamente.")
+                        st.success(f"🎵 Áudio reproduzido com sucesso! (Voz: {selected_voice.name})")
+                    else:
+                        st.warning("⚠️ Nenhuma voz do sistema encontrada. TTS pode não funcionar corretamente.")
 
-                except Exception as e:
-                    import traceback
-                    st.error(f"Erro ao reproduzir áudio: {str(e)}")
-                    st.error("Detalhes do erro:")
-                    st.code(traceback.format_exc())
-                    st.warning("TTS falhou, mas a conversa continua normalmente.")
-            st.rerun()
+            except Exception as e:
+                import traceback
+                st.error(f"Erro ao reproduzir áudio: {str(e)}")
+                st.error("Detalhes do erro:")
+                st.code(traceback.format_exc())
+                st.warning("TTS falhou, mas a conversa continua normalmente.")
+        st.rerun()
 
     # Botão Enter para gerar variações se há bloco atual e última entrada foi válida
     if st.session_state.current_bloco and st.session_state.last_valid:
@@ -1428,7 +1075,7 @@ def infer(memoria: dict, dominio: str) -> None:
                 
                 # Escolher variação aleatoriamente com pesos
                 bloco_id = str(st.session_state.current_bloco["bloco_id"])
-                chosen = weighted_choice(all_variations, bloco_id, st.session_state.likes)
+                chosen = weighted_choice(all_variations, bloco_id)
                 
                 chosen = variar_texto(chosen, st.session_state.current_bloco, dominio)
                 
@@ -1721,15 +1368,13 @@ def infer(memoria: dict, dominio: str) -> None:
             st.rerun()
 
 
-def weighted_choice(variations, bloco_id, likes=None):
+def weighted_choice(variations, bloco_id):
     """Escolhe uma variação com pesos baseados em likes."""
-    if likes is None:
-        likes = {}
-    if bloco_id not in likes:
-        likes[bloco_id] = {}
+    if bloco_id not in st.session_state.likes:
+        st.session_state.likes[bloco_id] = {}
     weights = []
     for var in variations:
-        count = likes[bloco_id].get(var, 0)
+        count = st.session_state.likes[bloco_id].get(var, 0)
         weights.append(max(1, count + 1))  # mínimo 1 para não zerar
     return random.choices(variations, weights=weights, k=1)[0]
 
@@ -1796,11 +1441,12 @@ def generate_cartesian_responses(texts: list, unconscious_vars_dict: dict) -> li
     return combinations
 
 
-def atualizar_inconsciente_para_im(memoria: dict, dominio: str, inconsciente: dict) -> None:
+def atualizar_inconsciente_para_im(memoria: dict, dominio: str) -> None:
     """Atualiza o inconsciente para o IM selecionado."""
     if dominio not in memoria["IM"]:
         return
     im_data = memoria["IM"][dominio]
+    inconsciente = st.session_state.inconsciente
     if dominio not in inconsciente.get("INCO", {}):
         inconsciente.setdefault("INCO", {})[dominio] = {
             "NOME": im_data.get("nome", f"IM_{dominio}"),
@@ -1812,7 +1458,7 @@ def atualizar_inconsciente_para_im(memoria: dict, dominio: str, inconsciente: di
 
 def test_model(memoria: dict, dominio: str) -> None:
     # Atualizar inconsciente para o IM selecionado
-    atualizar_inconsciente_para_im(memoria, dominio, st.session_state.inconsciente)
+    atualizar_inconsciente_para_im(memoria, dominio)
 
     ckpt = ckpt_path(dominio)
     if not os.path.exists(ckpt):
@@ -2988,224 +2634,16 @@ def submenu_backup(memoria: dict, inconsciente: dict) -> None:
     
     with col3:
         if st.button("💾 Fazer Backup Manual"):
-            # Gerar JSONs para download em vez de salvar no disco
+            # Salvar backups manuais com timestamp
             import time
             timestamp = int(time.time())
-            memoria_json = json.dumps(memoria, ensure_ascii=False, indent=2)
-            inconsciente_json = json.dumps(inconsciente, ensure_ascii=False, indent=2)
-            st.download_button(
-                label="📥 Baixar Backup de Memória",
-                data=memoria_json,
-                file_name=f"Adam_Lovely_memory_manual_backup_{timestamp}.json",
-                mime="application/json",
-                key=f"download_manual_memoria_{timestamp}"
-            )
-            st.download_button(
-                label="📥 Baixar Backup do Inconsciente",
-                data=inconsciente_json,
-                file_name=f"Adam_Lovely_inconscious_manual_backup_{timestamp}.json",
-                mime="application/json",
-                key=f"download_manual_inconsciente_{timestamp}"
-            )
-            st.success("✅ Backups prontos para download!")
+            backup_memoria_file = f"Adam_Lovely_memory_manual_backup_{timestamp}.json"
+            backup_inconsciente_file = f"Adam_Lovely_inconscious_manual_backup_{timestamp}.json"
+            salvar_json(backup_memoria_file, memoria)
+            salvar_json(backup_inconsciente_file, inconsciente)
+            st.success(f"✅ Backups manuais salvos: {backup_memoria_file} e {backup_inconsciente_file}")
     
     st.warning("⚠️ **Atenção:** 'Reiniciar Sessão' limpa todos os dados não salvos. Faça backup antes!")
-
-
-def infer_standalone(entrada: str, dominio: str, memoria: dict, inconsciente: dict, model, contexto: str = "") -> str:
-    """Inferência standalone sem UI."""
-    blocos = memoria["IM"][dominio]["blocos"]
-    
-    # Coletar todas as reações possíveis
-    all_possible_reactions = set()
-    for b in blocos:
-        reac = b["entrada"].get("reacao", "")
-        if reac:
-            all_possible_reactions.add(reac)
-        bloco_inco = next((bi for bi in inconsciente["INCO"][dominio]["Blocos"] if bi["Bloco_id"] == str(b["bloco_id"])), None)
-        if bloco_inco:
-            for marker in b["entrada"]["tokens"].get("RE", []):
-                if marker in bloco_inco["Entrada"]:
-                    data = bloco_inco["Entrada"][marker]
-                    all_possible_reactions.add(data["token"])
-                    for var in data.get("vars", []):
-                        if var != "0.0":
-                            all_possible_reactions.add(var)
-    
-    # Parse entrada
-    txt, reac = parse_text_reaction(entrada, all_possible_reactions)
-    bloco = None
-    for b in blocos:
-        if txt in b["entrada"].get("Multivars_Entrada", []):
-            bloco = b
-            break
-        txt_variations = get_variations_for_tokens(dominio, b["bloco_id"], "Entrada", b["entrada"]["tokens"].get("E", []))
-        reac_variations = get_variations_for_tokens(dominio, b["bloco_id"], "Entrada", b["entrada"]["tokens"].get("RE", []))
-        txt_tokens = Token(txt)
-        if all(normalize(t) in txt_variations for t in txt_tokens) and (not b["entrada"]["tokens"].get("RE") or (reac and normalize(reac) in reac_variations)):
-            bloco = b
-            break
-    
-    if bloco is None:
-        # Tentar similar para new reaction
-        similar_blocos = []
-        for b in blocos:
-            txt_variations = get_variations_for_tokens(dominio, b["bloco_id"], "Entrada", b["entrada"]["tokens"].get("E", []))
-            if all(normalize(t) in txt_variations for t in txt_tokens):
-                similar_blocos.append(b)
-        if similar_blocos:
-            # Use autoencoder for new reaction
-            bloco_generated = gerar_bloco_novo_unsupervised(memoria, dominio, txt, reac or "", contexto)
-            if bloco_generated:
-                bloco = bloco_generated
-            else:
-                return "Desculpe, não consegui gerar uma resposta."
-        else:
-            # Completely new, use autoencoder
-            bloco_generated = gerar_bloco_novo_unsupervised(memoria, dominio, txt, reac or "", contexto)
-            if bloco_generated:
-                bloco = bloco_generated
-            else:
-                return "Desculpe, não consegui gerar uma resposta."
-    
-    # Preparo e forward
-    ultimo_child_per_block = {}
-    if dominio in inconsciente.get("INCO", {}):
-        blocos_inco = inconsciente["INCO"][dominio].get("Blocos", [])
-        for bloco_inco in blocos_inco:
-            bloco_num = int(bloco_inco["Bloco_id"])
-            saida_vals = [float(key) for key in bloco_inco.get("SAÍDA", {}).keys()]
-            if saida_vals:
-                ultimo_child_per_block[bloco_num] = max(saida_vals)
-            else:
-                ultimo_child_per_block[bloco_num] = 0.50
-    
-    max_val = ultimo_child_per_block.get(bloco["bloco_id"], 0.50)
-    
-    # Load checkpoint params (assume same as in test_model_standalone)
-    ckpt = "insepa_0.pt"
-    (state,
-     maxE, maxRE, maxCE, maxPIDE,
-     mom_size, val_to_idx_E, val_to_idx_RE, val_to_idx_CE, val_to_idx_PIDE,
-     vE, vRE, vCE, vPIDE,
-     n_txt, n_emo, n_ctx,
-     max_ng
-     ) = torch.load(ckpt)
-    
-    def featurize(field: str, bloco: dict, max_len: int, vocab: dict, val_to_idx: dict, max_ng: int):
-        tokens = bloco["entrada"]["tokens"].get(field, [])
-        ngrams_list = [generate_ngrams(t, N_GRAM) for t in tokens]
-        ids = [vocab.get(ng, vocab.get(UNK, 0)) for nglist in ngrams_list for ng in nglist]
-        val_idxs = [val_to_idx.get(t, 0) for t in tokens]
-        vals = [float(t) for t in tokens]
-        moms = [int(t.split(".", 1)[0]) for t in tokens]
-        if vals:
-            min_v, max_v = min(vals), max(vals)
-            pos = [(v - min_v) / (max_v - min_v) if max_v > min_v else 0.0 for v in vals]
-        else:
-            pos = []
-        pad_ids = (max_len * max_ng) - len(ids)
-        pad_vals = max_len - len(tokens)
-        ids += [0] * pad_ids
-        val_idxs += [0] * pad_vals
-        vals += [0.0] * pad_vals
-        moms += [0] * pad_vals
-        pos += [0.0] * pad_vals
-        return (
-            torch.tensor([ids], dtype=torch.long),
-            torch.tensor([val_idxs], dtype=torch.long),
-            torch.tensor([vals], dtype=torch.float32),
-            torch.tensor([moms], dtype=torch.long),
-            torch.tensor([pos], dtype=torch.float32),
-        )
-    
-    E_ids, E_val_idxs, E_val, E_mom, E_pos = featurize("E", bloco, maxE, vE, val_to_idx_E, max_ng)
-    RE_ids, RE_val_idxs, RE_val, RE_mom, RE_pos = featurize("RE", bloco, maxRE, vRE, val_to_idx_RE, max_ng)
-    CE_ids, CE_val_idxs, CE_val, CE_mom, CE_pos = featurize("CE", bloco, maxCE, vCE, val_to_idx_CE, max_ng)
-    PI_ids, PI_val_idxs, PI_val, PI_mom, PI_pos = featurize("PIDE", bloco, maxPIDE, vPIDE, val_to_idx_PIDE, max_ng)
-    
-    x = {
-        "E": E_ids, "E_val": E_val, "E_mom": E_mom, "E_pos": E_pos, "E_val_idx": E_val_idxs,
-        "RE": RE_ids, "RE_val": RE_val, "RE_mom": RE_mom, "RE_pos": RE_pos, "RE_val_idx": RE_val_idxs,
-        "CE": CE_ids, "CE_val": CE_val, "CE_mom": CE_mom, "CE_pos": CE_pos, "CE_val_idx": CE_val_idxs,
-        "PIDE": PI_ids, "PIDE_val": PI_val, "PIDE_mom": PI_mom, "PIDE_pos": PI_pos, "PIDE_val_idx": PI_val_idxs,
-    }
-    
-    with torch.no_grad():
-        out = model(x)
-    
-    texts = bloco["saidas"][0]["textos"]
-    emoji = bloco["saidas"][0].get("reacao", "")
-    
-    # Gerar variações
-    all_variations = []
-    for txt in texts:
-        variations = [txt]
-        bloco_inco = next((b for b in inconsciente["INCO"][dominio]["Blocos"] if b["Bloco_id"] == str(bloco["bloco_id"])), None)
-        if bloco_inco:
-            for marker, data in bloco_inco["SAÍDA"].items():
-                if data["token"] in txt:
-                    valid_vars = [v for v in data["vars"] if v != "0.0"]
-                    for var in valid_vars:
-                        varied_txt = txt.replace(data["token"], var)
-                        variations.append(varied_txt)
-        all_variations.extend(variations)
-    
-    multivars_saida = bloco["saidas"][0].get("Multivars_Saída", [])
-    all_variations.extend(multivars_saida)
-    
-    # Escolher uma
-    chosen = weighted_choice(all_variations, str(bloco["bloco_id"]), {})
-    chosen = variar_texto(chosen, bloco, dominio)
-    response = f"{chosen} {emoji}"
-    return response
-
-
-def test_model_standalone():
-    """Testa o modelo carregando dados diretamente, sem Streamlit."""
-    memoria = carregar_json(ARQUIVO_MEMORIA, {"IM": {}})
-    inconsciente = carregar_json(ARQUIVO_INCONSCIENTE, {"INCO": {}})
-    dominio = "0"  # Teste com domínio 0
-    atualizar_inconsciente_para_im(memoria, dominio, inconsciente)
-    
-    ckpt = "insepa_0.pt"
-    if not os.path.exists(ckpt):
-        print("Sem checkpoint — treine primeiro.")
-        return
-
-    (state,
-     maxE, maxRE, maxCE, maxPIDE,
-     mom_size, val_to_idx_E, val_to_idx_RE, val_to_idx_CE, val_to_idx_PIDE,
-     vE, vRE, vCE, vPIDE,
-     n_txt, n_emo, n_ctx,
-     max_ng
-     ) = torch.load(ckpt)
-
-    model = AdamSegmentado(
-        nE=len(vE), nRE=len(vRE), nCE=len(vCE), nPIDE=len(vPIDE),
-        mom_size=mom_size,
-        num_vals_E=len(val_to_idx_E), num_vals_RE=len(val_to_idx_RE),
-        num_vals_CE=len(val_to_idx_CE), num_vals_PIDE=len(val_to_idx_PIDE),
-        n_txt=n_txt, n_emo=n_emo,
-        n_ctx=n_ctx,
-        max_E=maxE, max_RE=maxRE, max_CE=maxCE, max_PIDE=maxPIDE, max_ng=max_ng
-    )
-    try:
-        model.load_state_dict(state)
-    except RuntimeError as e:
-        print(f"Checkpoint incompatível devido a mudanças na arquitetura: {e}. Treine primeiro.")
-        return
-    model.eval()
-    
-    entrada = "E aí Athos B)"
-    print(f"Testando entrada: {entrada}")
-    try:
-        resposta = infer_standalone(entrada, dominio, memoria, inconsciente, model, "")
-        print(f"Resposta gerada: {resposta}")
-    except Exception as e:
-        print(f"Erro na inferência: {e}")
-        import traceback
-        traceback.print_exc()
 
 
 def main():
