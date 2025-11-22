@@ -597,6 +597,7 @@ def train(memoria: dict, dominio: str) -> None:
 
 
 def generate_insight(bloco, chosen=None):
+    principles = "Texto vem com emoção (E+RE). Reação (RE) simboliza emoção. Contexto é noção breve. Reflexão dá significado a Texto/Reação/Contexto. Criação baseia-se em similares (contextos, reações, textos). União dos 8 campos = conhecimento concreto (razão + sentimento). Ausência = abstrato (opinião/incompleto)."
     if bloco["entrada"]["texto"] and bloco["entrada"].get("reacao") and bloco["saidas"][0].get("contexto"):
         ep_txt = bloco["entrada"]["texto"]
         ep_reac = bloco["entrada"]["reacao"]
@@ -604,8 +605,8 @@ def generate_insight(bloco, chosen=None):
         if chosen is None:
             chosen = bloco["saidas"][0]["textos"][0]
         emoji = bloco["saidas"][0].get("reacao", "")
-        return f"Baseado na entrada '{ep_txt}', reação '{ep_reac}' e contexto '{contexto}', conclui que '{chosen} {emoji}' é a resposta mais adequada."
-    return None
+        return f"{principles} Baseado na entrada '{ep_txt}', reação '{ep_reac}' e contexto '{contexto}', conclui que '{chosen} {emoji}' é a resposta mais adequada."
+    return principles
 
 
 def infer(memoria: dict, dominio: str) -> None:
@@ -649,6 +650,8 @@ def infer(memoria: dict, dominio: str) -> None:
         train(memoria, dominio)
         return
     model.eval()
+
+    model_params = (state, maxE, maxRE, maxCE, maxPIDE, mom_size, val_to_idx_E, val_to_idx_RE, val_to_idx_CE, val_to_idx_PIDE, vE, vRE, vCE, vPIDE, n_txt, n_emo, n_ctx, max_ng)
 
     blocos = memoria["IM"][dominio]["blocos"]
     inconsciente = st.session_state.inconsciente
@@ -827,6 +830,23 @@ def infer(memoria: dict, dominio: str) -> None:
         st.session_state.current_bloco = bloco
         st.session_state.variation = 0
         st.session_state.last_valid = True
+
+        # Pensamento Divino: Validação dos 8 campos
+        bloco = st.session_state.current_bloco
+        fields_check = {
+            "E": len(bloco["entrada"]["tokens"].get("E", [])) > 0,
+            "RE": len(bloco["entrada"]["tokens"].get("RE", [])) > 0,
+            "CE": len(bloco["entrada"]["tokens"].get("CE", [])) > 0,
+            "PIDE": len(bloco["entrada"]["tokens"].get("PIDE", [])) > 0,
+            "S": len(bloco["saidas"][0]["tokens"].get("S", [])) > 0,
+            "RS": len(bloco["saidas"][0]["tokens"].get("RS", [])) > 0,
+            "CS": len(bloco["saidas"][0]["tokens"].get("CS", [])) > 0
+        }
+        missing_fields = [k for k, v in fields_check.items() if not v]
+        if missing_fields:
+            st.write(f"Pensamento Divino: Campos faltantes para conhecimento concreto: {', '.join(missing_fields)}. Continuando...")
+        else:
+            st.write("Pensamento Divino Ativado: Todos os 8 campos divinos estão presentes no conhecimento prévio dos blocos (E, RE, CE, PIDE, S, RS, CS). Conhecimento concreto alcançado.")
 
         # Gerar Insight se condições atendidas
         insight = generate_insight(st.session_state.current_bloco)
@@ -1042,6 +1062,20 @@ def infer(memoria: dict, dominio: str) -> None:
                 st.error("Detalhes do erro:")
                 st.code(traceback.format_exc())
                 st.warning("TTS falhou, mas a conversa continua normalmente.")
+
+        # Pensamento Divino: Gerar saídas similares para aprovação
+        similar_blocks = find_similar_blocks(st.session_state.current_bloco, memoria, dominio, model_params)
+        if similar_blocks:
+            st.write("Pensamento Divino: Saídas similares encontradas baseadas no conhecimento prévio dos blocos. Aprove uma para salvar como novo bloco:")
+            for i, sim_bloco in enumerate(similar_blocks):
+                variation = generate_variation_for_block(sim_bloco, dominio)
+                st.write(f"Opção {i+1}: {variation}")
+                if st.button(f"Aprovar Opção {i+1}", key=f"approve_{i}"):
+                    add_new_block_from_similar(memoria, dominio, sim_bloco, variation)
+                    st.success("Novo bloco salvo!")
+                    st.rerun()
+        else:
+            st.write("Pensamento Divino: Nenhum bloco similar encontrado no conhecimento prévio para gerar variações. O sistema continua aprendendo.")
         st.rerun()
 
     # Botão Enter para gerar variações se há bloco atual e última entrada foi válida
@@ -2644,6 +2678,134 @@ def submenu_backup(memoria: dict, inconsciente: dict) -> None:
             st.success(f"✅ Backups manuais salvos: {backup_memoria_file} e {backup_inconsciente_file}")
     
     st.warning("⚠️ **Atenção:** 'Reiniciar Sessão' limpa todos os dados não salvos. Faça backup antes!")
+
+
+def featurize(field: str, bloco: dict, max_len: int, vocab: dict, val_to_idx: dict, max_ng: int):
+    tokens = bloco["entrada"]["tokens"].get(field, [])
+    ngrams_list = [generate_ngrams(t, N_GRAM) for t in tokens]
+    ids = [vocab.get(ng, vocab.get(UNK, 0)) for nglist in ngrams_list for ng in nglist]
+    val_idxs = [val_to_idx.get(t, 0) for t in tokens]
+    vals = [float(t) for t in tokens]
+    moms = [int(t.split(".", 1)[0]) for t in tokens]
+    if vals:
+        min_v, max_v = min(vals), max(vals)
+        pos = [(v - min_v) / (max_v - min_v) if max_v > min_v else 0.0 for v in vals]
+    else:
+        pos = []
+    pad_ids = (max_len * max_ng) - len(ids)
+    pad_vals = max_len - len(tokens)
+    ids += [0] * pad_ids
+    val_idxs += [0] * pad_vals
+    vals += [0.0] * pad_vals
+    moms += [0] * pad_vals
+    pos += [0.0] * pad_vals
+    return (
+        torch.tensor([ids], dtype=torch.long),
+        torch.tensor([val_idxs], dtype=torch.long),
+        torch.tensor([vals], dtype=torch.float32),
+        torch.tensor([moms], dtype=torch.long),
+        torch.tensor([pos], dtype=torch.float32),
+    )
+
+
+def get_feature_vector(bloco: dict, model_params: tuple):
+    (state,
+     maxE, maxRE, maxCE, maxPIDE,
+     mom_size, val_to_idx_E, val_to_idx_RE, val_to_idx_CE, val_to_idx_PIDE,
+     vE, vRE, vCE, vPIDE,
+     n_txt, n_emo, n_ctx,
+     max_ng
+     ) = model_params
+
+    E_ids, E_val_idxs, E_val, E_mom, E_pos = featurize("E", bloco, maxE, vE, val_to_idx_E, max_ng)
+    RE_ids, RE_val_idxs, RE_val, RE_mom, RE_pos = featurize("RE", bloco, maxRE, vRE, val_to_idx_RE, max_ng)
+    CE_ids, CE_val_idxs, CE_val, CE_mom, CE_pos = featurize("CE", bloco, maxCE, vCE, val_to_idx_CE, max_ng)
+    PI_ids, PI_val_idxs, PI_val, PI_mom, PI_pos = featurize("PIDE", bloco, maxPIDE, vPIDE, val_to_idx_PIDE, max_ng)
+
+    # Concatenar todos os tensores em um vetor de features
+    features = torch.cat([
+        E_ids.flatten(), E_val_idxs.flatten(), E_val.flatten(), E_mom.flatten(), E_pos.flatten(),
+        RE_ids.flatten(), RE_val_idxs.flatten(), RE_val.flatten(), RE_mom.flatten(), RE_pos.flatten(),
+        CE_ids.flatten(), CE_val_idxs.flatten(), CE_val.flatten(), CE_mom.flatten(), CE_pos.flatten(),
+        PI_ids.flatten(), PI_val_idxs.flatten(), PI_val.flatten(), PI_mom.flatten(), PI_pos.flatten(),
+    ], dim=0)
+
+    return features
+
+
+def find_similar_blocks(bloco, memoria, dominio, model_params=None):
+    blocos = memoria["IM"][dominio]["blocos"]
+    if model_params is None:
+        # Fallback para o método antigo se não houver model_params
+        similar = []
+        current_contexto = bloco["entrada"]["contexto"]
+        current_reacao = bloco["entrada"]["reacao"]
+        for b in blocos:
+            if b["bloco_id"] == bloco["bloco_id"]:
+                continue
+            if b["entrada"]["contexto"] == current_contexto or b["entrada"]["reacao"] == current_reacao:
+                similar.append(b)
+        return similar[:3]
+
+    # Usar similaridade de cosseno nos vetores de features
+    import torch.nn.functional as F
+    current_features = get_feature_vector(bloco, model_params)
+    similarities = []
+    for b in blocos:
+        if b["bloco_id"] == bloco["bloco_id"]:
+            continue
+        b_features = get_feature_vector(b, model_params)
+        sim = F.cosine_similarity(current_features.unsqueeze(0), b_features.unsqueeze(0), dim=1).item()
+        similarities.append((b, sim))
+    # Ordenar por similaridade decrescente e pegar top 3 com sim > 0.7
+    similarities.sort(key=lambda x: x[1], reverse=True)
+    similar = [b for b, sim in similarities if sim > 0.7][:3]
+    return similar
+
+
+def generate_variation_for_block(bloco, dominio):
+    texts = bloco["saidas"][0]["textos"]
+    emoji = bloco["saidas"][0].get("reacao", "")
+    all_variations = []
+    for txt in texts:
+        variations = [txt]
+        bloco_inco = next((b for b in st.session_state.inconsciente["INCO"][dominio]["Blocos"] if b["Bloco_id"] == str(bloco["bloco_id"])), None)
+        if bloco_inco:
+            for marker, data in bloco_inco["SAÍDA"].items():
+                if data["token"] in txt:
+                    valid_vars = [v for v in data["vars"] if v != "0.0"]
+                    for var in valid_vars:
+                        varied_txt = txt.replace(data["token"], var)
+                        variations.append(varied_txt)
+        all_variations.extend(variations)
+    multivars_saida = bloco["saidas"][0].get("Multivars_Saída", [])
+    all_variations.extend(multivars_saida)
+    bloco_id = str(bloco["bloco_id"])
+    chosen = weighted_choice(all_variations, bloco_id)
+    chosen = variar_texto(chosen, bloco, dominio)
+    return f"{chosen} {emoji}"
+
+
+def add_new_block_from_similar(memoria, dominio, sim_bloco, variation):
+    universo = memoria["IM"][dominio]
+    blocos = universo["blocos"]
+    next_id = len(blocos) + 1
+    new_bloco = {
+        "bloco_id": next_id,
+        "entrada": sim_bloco["entrada"].copy(),
+        "saidas": [{
+            "textos": [variation.split()[0] if variation else "Resposta"],
+            "reacao": variation.split()[-1] if len(variation.split()) > 1 else "",
+            "contexto": sim_bloco["saidas"][0]["contexto"],
+            "tokens": {},
+            "fim": ""
+        }],
+        "open": True
+    }
+    blocos.append(new_bloco)
+    recalcular_marcadores_im(memoria, dominio)
+    salvar_json(ARQUIVO_MEMORIA, memoria)
+    salvar_json(ARQUIVO_INCONSCIENTE, st.session_state.inconsciente)
 
 
 def main():
