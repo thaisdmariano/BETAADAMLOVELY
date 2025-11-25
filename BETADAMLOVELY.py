@@ -433,6 +433,40 @@ class InsepaFieldDataset(Dataset):
 
 
 ## INSEPA_MODEL
+class PositionalEncoding(nn.Module):
+    def __init__(self, d_model, max_len=5000):
+        super(PositionalEncoding, self).__init__()
+        pe = torch.zeros(max_len, d_model)
+        position = torch.arange(0, max_len, dtype=torch.float).unsqueeze(1)
+        div_term = torch.exp(torch.arange(0, d_model, 2).float() * (-torch.log(torch.tensor(10000.0)) / d_model))
+        pe[:, 0::2] = torch.sin(position * div_term)
+        pe[:, 1::2] = torch.cos(position * div_term)
+        pe = pe.unsqueeze(0).transpose(0, 1)
+        self.register_buffer('pe', pe)
+
+    def forward(self, x):
+        return x + self.pe[:x.size(0), :]
+
+
+class SimpleGPT(nn.Module):
+    def __init__(self, vocab_size, embed_dim, num_heads, num_layers, max_len):
+        super(SimpleGPT, self).__init__()
+        self.embed = nn.Embedding(vocab_size, embed_dim)
+        self.pos_enc = PositionalEncoding(embed_dim, max_len)
+        self.transformer = nn.TransformerDecoder(
+            nn.TransformerDecoderLayer(embed_dim, num_heads, dim_feedforward=embed_dim * 4, dropout=0.1),
+            num_layers
+        )
+        self.fc_out = nn.Linear(embed_dim, vocab_size)
+
+    def forward(self, tgt, memory):
+        tgt_emb = self.embed(tgt)
+        tgt_emb = self.pos_enc(tgt_emb)
+        tgt_mask = nn.Transformer.generate_square_subsequent_mask(tgt.size(0)).to(tgt.device)
+        out = self.transformer(tgt_emb, memory, tgt_mask=tgt_mask)
+        return self.fc_out(out)
+
+
 class AdamSegmentado(nn.Module):
     def __init__(self,
                  nE: int, nRE: int, nCE: int, nPIDE: int,
@@ -466,6 +500,7 @@ class AdamSegmentado(nn.Module):
         self.max_CE = max_CE
         self.max_PIDE = max_PIDE
         self.max_ng = max_ng
+        self.max_out_len = max_out_len
 
         # Transformer Encoder melhorado com atenção multi-head
         encoder_layer = nn.TransformerEncoderLayer(d_model=EMBED_DIM, nhead=8, dim_feedforward=HIDDEN_DIM * 2, dropout=0.1)
@@ -491,6 +526,11 @@ class AdamSegmentado(nn.Module):
         self.decoder_layer = nn.TransformerDecoderLayer(d_model=EMBED_DIM, nhead=8, dim_feedforward=HIDDEN_DIM * 2, dropout=0.1)
         self.decoder = nn.TransformerDecoder(self.decoder_layer, num_layers=2)
         self.out_head = nn.Linear(EMBED_DIM, 1)
+
+        # Mapeamento de floats para índices para GPT
+        self.float_to_idx = {float(i / (out_vocab_size - 1)): i for i in range(out_vocab_size)}
+        self.idx_to_float = {i: float(i / (out_vocab_size - 1)) for i in range(out_vocab_size)}
+        self.gpt = SimpleGPT(vocab_size=out_vocab_size, embed_dim=EMBED_DIM, num_heads=8, num_layers=2, max_len=max_out_len)
 
         # Para decodificação
         self.v_txt = None  # Vocabulário de saída (dicionário token -> id)
@@ -534,30 +574,34 @@ class AdamSegmentado(nn.Module):
         h = transformed.mean(dim=1)  # (batch, EMBED_DIM)
         h = self.act(self.fc1(h))
 
-        # Decoder para geração
+        # Decoder para geração usando GPT
         if tgt is not None:
-            tgt_emb = self.proj_value(tgt.unsqueeze(-1))  # (batch, max_out_len, 1) -> (batch, max_out_len, EMBED_DIM)
-            tgt_emb = tgt_emb.permute(1, 0, 2)  # (max_out_len, batch, EMBED_DIM)
+            # Converter tgt floats para índices
+            tgt_indices = torch.tensor([self.float_to_idx.get(float(val), 0) for val in tgt.flatten()], dtype=torch.long, device=tgt.device).view(tgt.shape)
+            tgt_emb = self.gpt.embed(tgt_indices).permute(1, 0, 2)  # (max_out_len, batch, embed_dim)
+            tgt_mask = nn.Transformer.generate_square_subsequent_mask(tgt.size(1)).to(tgt.device)
             memory = h.unsqueeze(0)  # (1, batch, EMBED_DIM)
-            out_dec = self.decoder(tgt_emb, memory)  # (max_out_len, batch, EMBED_DIM)
-            out_dec = out_dec.permute(1, 0, 2)  # (batch, max_out_len, EMBED_DIM)
-            logits = self.out_head(out_dec)  # (batch, max_out_len, 1)
+            out_dec = self.gpt.transformer(tgt_emb, memory, tgt_mask=tgt_mask)
+            logits_indices = self.gpt.fc_out(out_dec)  # (max_out_len, batch, vocab_size)
+            # Converter logits de índices para floats
+            pred_indices = logits_indices.argmax(dim=-1)  # (max_out_len, batch)
+            pred_floats = torch.tensor([[self.idx_to_float[int(idx)] for idx in seq] for seq in pred_indices.t()], dtype=torch.float32, device=tgt.device).t()
+            logits = pred_floats  # (max_out_len, batch)
         else:
-            # Geração autoregressiva (simplificada, sem loop)
-            # Para inferência, começar com pad ou algo
-            if not hasattr(self, 'max_out_len'):
-                self.max_out_len = 10
+            # Geração autoregressiva usando GPT
             generated = []
-            current = torch.full((batch, 1), -1.0, dtype=torch.float32, device=h.device)  # começar com -1.0
+            current_idx = self.float_to_idx.get(0.26, 0)  # começar com 0.26
+            current_tensor = torch.full((batch, 1), current_idx, dtype=torch.long, device=h.device)
             for _ in range(self.max_out_len):
-                tgt_emb = self.proj_value(current).unsqueeze(0)  # (batch, EMBED_DIM) -> (1, batch, EMBED_DIM)
-                memory = h.unsqueeze(0)  # (1, batch, EMBED_DIM)
-                out_dec = self.decoder(tgt_emb, memory)  # (1, batch, EMBED_DIM)
-                out_dec = out_dec.permute(1, 0, 2)  # (batch, 1, EMBED_DIM)
-                next_value = self.out_head(out_dec)  # (batch, 1, 1)
-                generated.append(next_value.squeeze(-1))
-                current = next_value.squeeze(-1)
-            logits = torch.cat(generated, dim=1)  # (batch, max_out_len)
+                tgt_emb = self.gpt.embed(current_tensor).permute(1, 0, 2)  # (1, batch, embed_dim)
+                tgt_mask = nn.Transformer.generate_square_subsequent_mask(current_tensor.size(1)).to(current_tensor.device)
+                memory = h.unsqueeze(0)
+                out_dec = self.gpt.transformer(tgt_emb, memory, tgt_mask=tgt_mask)
+                next_logits = self.gpt.fc_out(out_dec[-1])  # último token (batch, vocab_size)
+                next_idx = next_logits.argmax(dim=-1)  # (batch,)
+                generated.append(self.idx_to_float[int(next_idx[0])])  # assumir batch=1
+                current_tensor = torch.cat([current_tensor, next_idx.unsqueeze(1)], dim=1)
+            logits = torch.tensor(generated, dtype=torch.float32, device=h.device).unsqueeze(1).repeat(1, batch)
 
         return {
             "out": logits,
@@ -566,35 +610,63 @@ class AdamSegmentado(nn.Module):
         }
 
     def decode_tokens(self, generated_ids: torch.Tensor, bloco: dict, dominio: str, inconsciente: dict = None) -> list:
-        """Decodifica IDs de tokens gerados para uma lista de respostas únicas usando o vocabulário de saída."""
+        """Decodifica IDs de tokens gerados para uma lista de respostas únicas usando matching de sequências de floats."""
         if bloco is None:
             return ["Bloco inválido."]
         if inconsciente is None:
             inconsciente = st.session_state.inconsciente
         if not hasattr(self, 'idx_to_txt'):
             return ["Vocabulário não carregado."]
-        tokens = set()
-        full_tokens = []
-        for val in generated_ids.flatten():
-            if val.item() != -1.0:  # Ignorar padding
-                # Encontrar palavra com valor mais próximo
-                closest_val = min(self.idx_to_txt.keys(), key=lambda v: abs(v - val.item()))
-                word = self.idx_to_txt[closest_val]
-                if word not in tokens:
-                    tokens.add(word)
-                    full_tokens.append(word)
-        full_text = " ".join(full_tokens).strip()
-        if not full_text:
-            return [""]
-        # Gerar múltiplas variações únicas
-        unique_responses = set()
-        attempts = 0
-        while len(unique_responses) < 3 and attempts < 20:
-            varied = variar_texto(full_text, bloco, dominio, 'saida', inconsciente)
-            unique_responses.add(varied)
-            attempts += 1
-        responses = list(unique_responses)
-        return responses if responses else [""]
+        
+        # Inverter idx_to_txt para word_to_idx
+        word_to_idx = {v: k for k, v in self.idx_to_txt.items()}
+        
+        # Obter as respostas possíveis do bloco
+        textos = bloco["saidas"][0]["textos"]
+        reacao = bloco["saidas"][0].get("reacao", "")
+        respostas_possiveis = [texto + (" " + reacao if reacao else "") for texto in textos]
+        
+        # Definir sequências esperadas para cada resposta
+        sequencias_esperadas = {}
+        for resp in respostas_possiveis:
+            tokens = Token(resp)
+            seq = []
+            for token in tokens:
+                if token in word_to_idx:
+                    seq.append(word_to_idx[token])
+                else:
+                    # Fallback para um valor padrão
+                    seq.append(0.26)
+            sequencias_esperadas[resp] = seq
+        
+        # Sequência gerada
+        generated_seq = [val.item() for val in generated_ids.flatten() if val.item() != -1.0]
+        
+        # Encontrar a resposta com a sequência mais próxima
+        best_resp = None
+        best_dist = float('inf')
+        for resp, seq_exp in sequencias_esperadas.items():
+            # Comparar sequências (assumindo mesmo tamanho ou truncar)
+            min_len = min(len(generated_seq), len(seq_exp))
+            dist = sum(abs(generated_seq[i] - seq_exp[i]) for i in range(min_len))
+            if len(generated_seq) != len(seq_exp):
+                dist += abs(len(generated_seq) - len(seq_exp)) * 0.1  # penalidade por diferença de tamanho
+            if dist < best_dist:
+                best_dist = dist
+                best_resp = resp
+        
+        if best_resp:
+            # Aplicar variações inconscientes
+            unique_responses = set()
+            attempts = 0
+            while len(unique_responses) < 3 and attempts < 20:
+                varied = variar_texto(best_resp, bloco, dominio, 'saida', inconsciente)
+                unique_responses.add(varied)
+                attempts += 1
+            responses = list(unique_responses)
+            return responses if responses else [best_resp]
+        else:
+            return ["Sequência não reconhecida."]
 
 
 ## INSEPA_TRAIN
@@ -638,7 +710,7 @@ def train(memoria: dict, dominio: str) -> None:
             opt.zero_grad()
             out = model(x, y)
             loss = (
-                    mse(out["out"].view(-1), y.view(-1)) +
+                    mse(out["out"].reshape(-1), y.view(-1)) +
                     mse(out["recon_pide"], out["pide_raw"])  # Perda não supervisionada para PIDE
             )
             loss.backward()
@@ -651,7 +723,7 @@ def train(memoria: dict, dominio: str) -> None:
                 for x, y in val_ld:
                     out = model(x, y)
                     val_loss += (
-                            mse(out["out"].view(-1), y.view(-1)).item() +
+                            mse(out["out"].reshape(-1), y.view(-1)).item() +
                             mse(out["recon_pide"], out["pide_raw"]).item()  # Perda não supervisionada
                     )
             val_loss /= len(val_ld)
@@ -1072,6 +1144,8 @@ def infer(memoria: dict, dominio: str) -> None:
     if "conversa_blocos" not in st.session_state:
         st.session_state.conversa_blocos = []
 
+    x = None  # Inicializar x para evitar UnboundLocalError
+
     # Exibir mensagens anteriores
     for message in st.session_state.messages:
         with st.chat_message(message["role"]):
@@ -1226,9 +1300,12 @@ def infer(memoria: dict, dominio: str) -> None:
             with torch.no_grad():
                 out = model(x)  # tgt=None para geração autoregressiva
 
-            # Gerar sequência: out["out"] é (batch, max_out_len, out_vocab_size)
-            generated_logits = out["out"][0]  # (max_out_len, out_vocab_size)
-            generated_ids = generated_logits.argmax(dim=-1).view(-1)  # (max_out_len,)
+            # Gerar sequência: out["out"] é (batch, max_out_len)
+            generated_logits = out["out"][0]  # (max_out_len,)
+            generated_ids = generated_logits  # floats directly
+
+            # Forçar início na faixa de saída (0.26) para gerar respostas completas
+            generated_ids[0] = 0.26
 
             # Mapear IDs para tokens, ignorar padding (0)
             generated_responses = model.decode_tokens(generated_ids, bloco, dominio)
@@ -1236,11 +1313,7 @@ def infer(memoria: dict, dominio: str) -> None:
 
             # Aplicar variações inconscientes para criatividade na saída
             if generated_text:
-                varied_text = variar_texto(generated_text, bloco, dominio)
-                varied_reaction = variar_texto(bloco["saidas"][0]["reacao"], bloco, dominio)
-                response = varied_text
-                if varied_reaction:
-                    response += " " + varied_reaction
+                response = variar_texto(generated_text, bloco, dominio)
                 # Adicionar frase extra de Multivars_Saída se disponível
                 multivars_saida = bloco["saidas"][0].get("Multivars_Saída", [])
                 if multivars_saida:
@@ -1526,12 +1599,16 @@ Contexto: {st.session_state.proposta_contexto}
         col1, col2 = st.columns(2)
         with col1:
             if st.button("Enter", key="enter_button"):
-                with torch.no_grad():
-                    out = model(x)  # tgt=None para geração autoregressiva
+                if x is not None:
+                    with torch.no_grad():
+                        out = model(x)  # tgt=None para geração autoregressiva
 
                 # Gerar sequência: out["out"] é (batch, max_out_len, out_vocab_size)
                 generated_logits = out["out"][0]  # (max_out_len, out_vocab_size)
-                generated_ids = generated_logits.argmax(dim=-1).view(-1)  # (max_out_len,)
+                generated_ids = generated_logits  # floats directly
+
+                # Forçar início na faixa de saída (0.26) para gerar respostas completas
+                generated_ids[0] = 0.26
 
                 # Decodificar IDs para texto usando o vocabulário do modelo
                 generated_responses = model.decode_tokens(generated_ids, bloco, dominio)
@@ -1540,11 +1617,7 @@ Contexto: {st.session_state.proposta_contexto}
                 # Aplicar variações inconscientes para criatividade na saída
                 bloco = st.session_state.current_bloco
                 if generated_text:
-                    varied_text = variar_texto(generated_text, bloco, dominio)
-                    varied_reaction = variar_texto(bloco["saidas"][0]["reacao"], bloco, dominio)
-                    response = varied_text
-                    if varied_reaction:
-                        response += " " + varied_reaction
+                    response = variar_texto(generated_text, bloco, dominio)
                     # Adicionar frase extra de Multivars_Saída se disponível
                     multivars_saida = bloco["saidas"][0].get("Multivars_Saída", [])
                     if multivars_saida:
