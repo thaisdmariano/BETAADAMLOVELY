@@ -172,6 +172,42 @@ def variar_texto(texto: str, bloco: dict, dominio: str, tipo: str = 'saida', inc
     return ' '.join(variado)
 
 
+def variar_texto_rag(bloco, dominio, variations_from_blocks):
+    inconsciente = st.session_state.inconsciente
+    bloco_inco = next((b for b in inconsciente["INCO"][dominio]["Blocos"] if b["Bloco_id"] == str(bloco["bloco_id"])), None)
+    if not bloco_inco:
+        return "Erro: bloco não encontrado no inconsciente."
+    # Coletar vars inconscientes
+    unconscious_vars = {}
+    for data in bloco_inco["Entrada"].values():
+        token = data["token"]
+        if isinstance(token, list):
+            token = str(token)
+        vars_list = data["vars"]
+        if vars_list and vars_list != ["0.0"]:
+            unconscious_vars[token] = vars_list
+    for data in bloco_inco["SAÍDA"].values():
+        token = data["token"]
+        if isinstance(token, list):
+            token = str(token)
+        vars_list = data["vars"]
+        if vars_list and vars_list != ["0.0"]:
+            unconscious_vars[token] = vars_list
+    # Agora, para cada variation in variations_from_blocks, aplicar variações
+    varied_texts = []
+    for variation in variations_from_blocks:
+        varied = variation
+        for token, vars_list in unconscious_vars.items():
+            if token in variation:
+                # Escolher uma var aleatória
+                chosen_var = random.choice(vars_list)
+                varied = varied.replace(token, chosen_var)
+        varied_texts.append(varied)
+    # Escolher uma das varied_texts
+    chosen = random.choice(varied_texts) if varied_texts else "Resposta variada vazia."
+    return chosen
+
+
 def get_variations_for_tokens(im_id: str, bloco_id: int, campo: str, markers: List[str]) -> List[str]:
     """Obtém variações de tokens para marcadores específicos."""
     inconsciente = st.session_state.inconsciente
@@ -536,34 +572,70 @@ class AdamSegmentado(nn.Module):
         self.v_txt = None  # Vocabulário de saída (dicionário token -> id)
         self.idx_to_txt = None  # Mapeamento id -> token
 
-    def forward(self, x: Dict[str, torch.Tensor], tgt: torch.Tensor = None) -> Dict[str, torch.Tensor]:
+    def forward(self, x: Dict[str, torch.Tensor], tgt: torch.Tensor = None, start_value: float = 0.26) -> Dict[str, torch.Tensor]:
         batch = x["E"].shape[0]
         # Campo E
-        eE_tok = self.em_E(x["E"]).view(batch, self.max_E, self.max_ng, EMBED_DIM).mean(dim=2)
+        seq_len_E = x["E"].shape[1]
+        expected_E = self.max_E * self.max_ng
+        if seq_len_E < expected_E:
+            pad_E = torch.zeros(batch, expected_E - seq_len_E, dtype=torch.long, device=x["E"].device)
+            x_E = torch.cat([x["E"], pad_E], dim=1)
+        elif seq_len_E > expected_E:
+            x_E = x["E"][:, :expected_E]
+        else:
+            x_E = x["E"]
+        eE_tok = self.em_E(x_E).view(batch, self.max_E, self.max_ng, EMBED_DIM).mean(dim=2)
         eE_val = self.em_Eval(x["E_val_idx"])
         eE_mom = self.em_Emom(x["E_mom"])
         eE_pos = self.proj_Epos(x["E_val"].unsqueeze(-1))
         eE = (eE_tok + eE_val + eE_mom + eE_pos).mean(dim=1)
         # Campo RE
-        eRE_tok = self.em_RE(x["RE"]).view(batch, self.max_RE, self.max_ng, EMBED_DIM).mean(dim=2)
+        seq_len_RE = x["RE"].shape[1]
+        expected_RE = self.max_RE * self.max_ng
+        if seq_len_RE < expected_RE:
+            pad_RE = torch.zeros(batch, expected_RE - seq_len_RE, dtype=torch.long, device=x["RE"].device)
+            x_RE = torch.cat([x["RE"], pad_RE], dim=1)
+        elif seq_len_RE > expected_RE:
+            x_RE = x["RE"][:, :expected_RE]
+        else:
+            x_RE = x["RE"]
+        eRE_tok = self.em_RE(x_RE).view(batch, self.max_RE, self.max_ng, EMBED_DIM).mean(dim=2)
         eRE_val = self.em_REval(x["RE_val_idx"])
         eRE_mom = self.em_REmom(x["RE_mom"])
         eRE_pos = self.proj_REpos(x["RE_val"].unsqueeze(-1))
         eRE = (eRE_tok + eRE_val + eRE_mom + eRE_pos).mean(dim=1)
         # Campo CE
-        eCE_tok = self.em_CE(x["CE"]).view(batch, self.max_CE, self.max_ng, EMBED_DIM).mean(dim=2)
+        seq_len_CE = x["CE"].shape[1]
+        expected_CE = self.max_CE * self.max_ng
+        if seq_len_CE < expected_CE:
+            pad_CE = torch.zeros(batch, expected_CE - seq_len_CE, dtype=torch.long, device=x["CE"].device)
+            x_CE = torch.cat([x["CE"], pad_CE], dim=1)
+        elif seq_len_CE > expected_CE:
+            x_CE = x["CE"][:, :expected_CE]
+        else:
+            x_CE = x["CE"]
+        eCE_tok = self.em_CE(x_CE).view(batch, self.max_CE, self.max_ng, EMBED_DIM).mean(dim=2)
         eCE_val = self.em_CEval(x["CE_val_idx"])
         eCE_mom = self.em_CEmom(x["CE_mom"])
         eCE_pos = self.proj_CEpos(x["CE_val"].unsqueeze(-1))
         eCE = (eCE_tok + eCE_val + eCE_mom + eCE_pos).mean(dim=1)
-        # Campo PIDE com autoencoder não supervisionado
-        ePI_tok = self.em_PIDE(x["PIDE"]).view(batch, self.max_PIDE, self.max_ng, EMBED_DIM).mean(dim=2)
+        # Campo PIDE
+        seq_len_PIDE = x["PIDE"].shape[1]
+        expected_PIDE = self.max_PIDE * self.max_ng
+        if seq_len_PIDE < expected_PIDE:
+            pad_PIDE = torch.zeros(batch, expected_PIDE - seq_len_PIDE, dtype=torch.long, device=x["PIDE"].device)
+            x_PIDE = torch.cat([x["PIDE"], pad_PIDE], dim=1)
+        elif seq_len_PIDE > expected_PIDE:
+            x_PIDE = x["PIDE"][:, :expected_PIDE]
+        else:
+            x_PIDE = x["PIDE"]
+        ePI_tok = self.em_PIDE(x_PIDE).view(batch, self.max_PIDE, self.max_ng, EMBED_DIM).mean(dim=2)
         ePI_val = self.em_PIDEval(x["PIDE_val_idx"])
         ePI_mom = self.em_PIDEmom(x["PIDE_mom"])
         ePI_pos = self.proj_PIDEpos(x["PIDE_val"].unsqueeze(-1))
         ePIDE_raw = (ePI_tok + ePI_val + ePI_mom + ePI_pos).mean(dim=1)
         ePIDE_encoded = self.encoder_pide(ePIDE_raw)  # Codificação comprimida
-        ePIDE_recon = self.decoder_pide(ePIDE_encoded)  # Reconstrução para perda não supervisionada
+        ePIDE_recon = self.decoder_pide(ePIDE_encoded)  # Reconstrução
         ePIDE = ePIDE_raw  # Usar embedding raw no transformer
 
         # Agrega e classifica com transformer melhorado
@@ -590,7 +662,7 @@ class AdamSegmentado(nn.Module):
         else:
             # Geração autoregressiva usando GPT
             generated = []
-            current_idx = self.float_to_idx.get(0.26, 0)  # começar com 0.26
+            current_idx = self.float_to_idx.get(start_value, 0)
             current_tensor = torch.full((batch, 1), current_idx, dtype=torch.long, device=h.device)
             for _ in range(self.max_out_len):
                 tgt_emb = self.gpt.embed(current_tensor).permute(1, 0, 2)  # (1, batch, embed_dim)
@@ -612,7 +684,15 @@ class AdamSegmentado(nn.Module):
     def decode_tokens(self, generated_ids: torch.Tensor, bloco: dict, dominio: str, inconsciente: dict = None) -> list:
         """Decodifica IDs de tokens gerados para uma lista de respostas únicas usando matching de sequências de floats."""
         if bloco is None:
-            return ["Bloco inválido."]
+            # Usar vocabulário do modelo para geração autônoma
+            generated_seq = [val.item() for val in generated_ids.flatten() if val.item() != -1.0]
+            response_tokens = []
+            for val in generated_seq:
+                idx = self.float_to_idx.get(val, 0)
+                token = self.idx_to_txt.get(idx, UNK)
+                response_tokens.append(token)
+            response_text = ' '.join(response_tokens)
+            return [response_text]
         if inconsciente is None:
             inconsciente = st.session_state.inconsciente
         if not hasattr(self, 'idx_to_txt'):
@@ -752,7 +832,7 @@ def train(memoria: dict, dominio: str) -> None:
     st.success(f"✅ Treino concluído. best_val_loss={best:.4f}")
     
     # Salvar backup do JSON usado para treinamento
-    backup_memoria = f"Adam_Lovely_memory_backup_{dominio}_{int(time.time())}.json"
+    backup_memoria = f"backup/Adam_Lovely_memory_backup_{dominio}_{int(time.time())}.json"
     salvar_json(backup_memoria, memoria)
     st.info(f"📁 Backup do JSON salvo como: {backup_memoria}")
 
@@ -1002,8 +1082,101 @@ def calcular_similaridade(bloco: dict, txt: str, reac: str, contexto: str, thoug
     ctx_sim = len(ctx_tokens & bloco_ctx) / len(ctx_tokens | bloco_ctx) if ctx_tokens or bloco_ctx else 0
     thought_sim = len(thought_tokens & bloco_thought) / len(thought_tokens | bloco_thought) if thought_tokens or bloco_thought else 0
     
-    # Peso: texto 0.3, reação 0.2, contexto 0.3, pensamento 0.2
-    return 0.3 * txt_sim + 0.2 * reac_sim + 0.3 * ctx_sim + 0.2 * thought_sim
+    # Peso: contexto 0.3, reação 0.3, pensamento 0.3, texto 0.1
+    return 0.3 * ctx_sim + 0.3 * reac_sim + 0.3 * thought_sim + 0.1 * txt_sim
+
+
+## ALNULU_ENCODING
+def alnulu_encode(texto: str) -> List[float]:
+    """ALNULU encoding: converte texto em valores numéricos para similaridade."""
+    mapa = {'A':1,'B':2,'C':3,'D':4,'E':5,'F':6,'G':7,'H':8,'I':9,'J':-10,'K':11,'L':12,'M':-13,'N':14,'O':15,'P':16,'Q':17,'R':18,'S':19,'T':20,'U':21,'V':-22,'W':23,'X':24,'Y':-25,'Z':26,'0':0,'1':1,'2':2,'3':3,'4':4,'5':5,'6':6,'7':7,'8':8,'9':9,'.':2,'!':3,'?':4,',':1,';':1,':':1,'-':1}
+    equiv = {'Á':'A','À':'A','Â':'A','Ã':'A','Ä':'A','È':'E','Ê':'E','É':'E','Ì':'I','Î':'I','Í':'I','Ó':'O','Ò':'O','Ô':'O','Õ':'O','Ö':'O','Ú':'U','Ù':'U','Û':'U','Ü':'U','Ç':'C','Ñ':'N','4':'A','3':'E','1':'I','0':'O','5':'S','7':'T','2':'Z'}
+    return [float(mapa.get(equiv.get(char.upper(), char.upper()), 0.0)) for char in texto]
+
+
+def alnulu_similarity(vec1: List[float], vec2: List[float]) -> float:
+    """Calcula similaridade entre dois vetores ALNULU usando diferença absoluta média, penalizando diferença de comprimento."""
+    if not vec1 or not vec2:
+        return 0.0
+    len1, len2 = len(vec1), len(vec2)
+    min_len = min(len1, len2)
+    max_len = max(len1, len2)
+    diff = sum(abs(vec1[i] - vec2[i]) for i in range(min_len))
+    # Penalizar diferença de comprimento
+    len_penalty = abs(len1 - len2) / max_len if max_len > 0 else 0.0
+    max_possible_diff = min_len * 26  # Máxima diferença possível (A-Z range)
+    sim = 1.0 - (diff / max_possible_diff) if max_possible_diff > 0 else 0.0
+    return max(0.0, sim - len_penalty)
+
+
+def retrieve_similar_blocks_alnulu(txt: str, reac: str, contexto: str, thought: str, dominio: str, top_k=3) -> List[Tuple[float, dict]]:
+    """Busca blocos similares usando ALNULU para identidade e similaridade, priorizando contexto e emoção."""
+    memoria = st.session_state.memoria
+    if dominio not in memoria["IM"]:
+        return []
+    blocos = memoria["IM"][dominio]["blocos"]
+    
+    # Encode input
+    txt_vec = alnulu_encode(txt)
+    reac_vec = alnulu_encode(reac)
+    ctx_vec = alnulu_encode(contexto)
+    thought_vec = alnulu_encode(thought)
+    
+    similarities = []
+    for bloco in blocos:
+        # Encode bloco
+        bloco_txt_vec = alnulu_encode(bloco["entrada"]["texto"])
+        bloco_reac_vec = alnulu_encode(bloco["entrada"].get("reacao", ""))
+        bloco_ctx_vec = alnulu_encode(bloco["entrada"].get("contexto", ""))
+        bloco_thought_vec = alnulu_encode(bloco["entrada"].get("pensamento_interno", ""))
+        
+        # Similaridade por campo (pesos ajustados: contexto 0.4, reação 0.3, texto 0.2, pensamento 0.1)
+        txt_sim = alnulu_similarity(txt_vec, bloco_txt_vec)
+        reac_sim = alnulu_similarity(reac_vec, bloco_reac_vec)
+        ctx_sim = alnulu_similarity(ctx_vec, bloco_ctx_vec)
+        thought_sim = alnulu_similarity(thought_vec, bloco_thought_vec)
+        
+        overall_sim = 0.2 * txt_sim + 0.3 * reac_sim + 0.4 * ctx_sim + 0.1 * thought_sim
+        
+        # Bônus por concretude: se bloco tem contexto e pensamento, +0.1
+        concretude_bonus = 0.1 if bloco["entrada"].get("contexto") and bloco["entrada"].get("pensamento_interno") else 0.0
+        overall_sim = min(1.0, overall_sim + concretude_bonus)
+        
+        similarities.append((overall_sim, bloco))
+    
+    similarities.sort(key=lambda x: x[0], reverse=True)
+    return similarities[:top_k]
+
+
+def similaridade_palavras(txt1: str, txt2: str) -> float:
+    """Calcula similaridade baseada em interseção de palavras tokenizadas."""
+    set1 = set(Token(txt1.lower()))
+    set2 = set(Token(txt2.lower()))
+    return len(set1 & set2) / len(set1 | set2) if set1 or set2 else 0.0
+
+
+def parse_quoted_response(prompt: str) -> str:
+    """Parseia resposta, extraindo apenas o conteúdo entre aspas duplas se presente, senão retorna o prompt limpo."""
+    import re
+    match = re.search(r'"([^"]*)"', prompt)
+    if match:
+        return match.group(1).strip()
+    else:
+        return prompt.strip()
+
+
+def parse_text_reaction(prompt: str) -> tuple[str, str]:
+    """Parseia o prompt para separar texto e reação, assumindo que a reação é a última palavra se for curta ou não alfanumérica."""
+    words = prompt.split()
+    if not words:
+        return prompt, ""
+    last = words[-1]
+    if len(last) <= 3 or not last.isalnum():
+        txt = ' '.join(words[:-1])
+        reac = last
+        return txt, reac
+    else:
+        return prompt, ""
 
 
 def infer(memoria: dict, dominio: str) -> None:
@@ -1230,12 +1403,12 @@ def infer(memoria: dict, dominio: str) -> None:
 
         # Parse entrada usando INSEPA: encontrar bloco por reação no final, extrair txt/reac, matching por texto (incluindo vars e multivars) e reação
         s = prompt.strip()
+        # Usar parse_text_reaction para definir reac inicialmente
+        txt, reac = parse_text_reaction(s)
         bloco = None
-        reac = ""
-        txt = ""
         for b in blocos:
-            bloco_reac = b["entrada"].get("reacao", "")
-            if bloco_reac and s.endswith(bloco_reac):
+            bloco_reac = b["entrada"].get("reacao", "").lower().strip()
+            if bloco_reac and s.lower().strip().endswith(bloco_reac):
                 reac = bloco_reac
                 txt = s[:-len(bloco_reac)].rstrip()
                 # Coletar textos possíveis: base, multivars, variações com vars
@@ -1245,304 +1418,422 @@ def infer(memoria: dict, dominio: str) -> None:
                     bloco = b
                     break
 
-        # Adicionar bloco ao histórico se for novo
-        if bloco and bloco not in st.session_state.conversa_blocos:
-            st.session_state.conversa_blocos.append(bloco)
-
-        st.session_state.current_bloco = bloco
-        st.session_state.variation = 0
-        st.session_state.last_valid = True
-
-        # Gerar Insight se condições atendidas
-        if st.session_state.current_bloco:
-            insight = generate_insight(st.session_state.current_bloco)
-            if insight:
-                st.write(insight)
-        else:
-            insight = None
-
-        # Módulo de Autoconsciência: Reflexão sobre a interação
-        if len(st.session_state.conversa_blocos) > 1:
-            reflexao = gerar_reflexao(st.session_state.conversa_blocos, dominio)
-            if reflexao:
-                st.write(f"🤔 **Reflexão Interna:** {reflexao}")
-
+        # Mostrar passos como no teste
+        # st.write("### 1. Match Exato")  # Removido para chat limpo
         if bloco:
-            # Preparo e forward
-            max_val = ultimo_child_per_block.get(bloco["bloco_id"], 0.50)
-            E_ids, E_val_idxs, E_val, E_mom, E_pos = featurize("E", bloco, maxE, vE, val_to_idx_E, max_ng)
-            RE_ids, RE_val_idxs, RE_val, RE_mom, RE_pos = featurize("RE", bloco, maxRE, vRE, val_to_idx_RE, max_ng)
-            CE_ids, CE_val_idxs, CE_val, CE_mom, CE_pos = featurize("CE", bloco, maxCE, vCE, val_to_idx_CE, max_ng)
-            PI_ids, PI_val_idxs, PI_val, PI_mom, PI_pos = featurize("PIDE", bloco, maxPIDE, vPIDE, val_to_idx_PIDE, max_ng)
+            # st.success(f"✅ Match exato encontrado: '{txt} {reac}'")  # Removido
+            pass
+        else:
+            # st.warning(f"❌ Nenhum match exato para '{txt} {reac}'")  # Removido
+            pass
 
-            x = {
-                "E": E_ids, "E_val": E_val, "E_mom": E_mom, "E_pos": E_pos, "E_val_idx": E_val_idxs,
-                "RE": RE_ids, "RE_val": RE_val, "RE_mom": RE_mom, "RE_pos": RE_pos, "RE_val_idx": RE_val_idxs,
-                "CE": CE_ids, "CE_val": CE_val, "CE_mom": CE_mom, "CE_pos": CE_pos, "CE_val_idx": CE_val_idxs,
-                "PIDE": PI_ids, "PIDE_val": PI_val, "PIDE_mom": PI_mom, "PIDE_pos": PI_pos, "PIDE_val_idx": PI_val_idxs,
-            }
+        # Se não encontrou match exato, tentar similaridade ALNULU
+        # st.write("### 2. Similaridade ALNULU")  # Removido para chat limpo
+        if bloco is None and txt and reac:
+            # Dividir input em partes baseadas em reações encontradas, como no teste
+            partes = []
+            remaining = txt
+            while remaining:
+                found = False
+                for b in blocos:
+                    bloco_reac = b["entrada"].get("reacao", "").strip()
+                    if bloco_reac and len(bloco_reac) > 1 and bloco_reac in remaining:
+                        idx = remaining.find(bloco_reac)
+                        if idx > 0:
+                            parte = remaining[:idx + len(bloco_reac)].strip()
+                            partes.append(parte)
+                            remaining = remaining[idx + len(bloco_reac):].strip().lstrip(".,!? ")
+                            found = True
+                            break
+                if not found:
+                    if remaining.strip():
+                        partes.append(remaining.strip())
+                    break
+            if not partes:
+                partes = [txt]
+            # Não adicionar reac global
+            
+            respostas_combinadas = []
+            for parte in partes:
+                # Usar parse_text_reaction para cada parte
+                parte_clean, parte_reac = parse_text_reaction(parte)
+                
+                similares = retrieve_similar_blocks_alnulu(parte_clean, parte_reac, "", "", dominio, top_k=1)
+                if similares:
+                    bloco_sim = similares[0][1]
+                    resposta_texto = bloco_sim['saidas'][0]['textos'][0]
+                    resposta_reacao = bloco_sim['saidas'][0].get('reacao', '')
+                    resposta = resposta_texto + (" " + resposta_reacao if resposta_reacao else "")
+                    variations_from_blocks = bloco_sim["saidas"][0]["textos"] + bloco_sim["saidas"][0].get("Multivars_Saída", [])
+                    resposta_variada = variar_texto_rag(bloco_sim, dominio, variations_from_blocks)
+                    if resposta_variada:
+                        resposta = resposta_variada + (" " + resposta_reacao if resposta_reacao else "")
+                    respostas_combinadas.append(resposta)
+            
+            if respostas_combinadas:
+                response = ' '.join(respostas_combinadas)
+                bloco = "combined"
+        elif bloco is None:
+            # st.write("### 2. Similaridade ALNULU")  # Removido
+            # st.info("Reação vazia ou não aplicável, pulando similaridade.")  # Removido
+            pass
 
-            # Recriar out_vocab para mapeamento
-            out_vocab = {}
-            for b in blocos:
-                for saida in b["saidas"]:
-                    for texto in saida["textos"]:
-                        for token in Token(texto):
-                            out_vocab[token] = out_vocab.get(token, len(out_vocab))
-                    reac = saida.get("reacao", "")
-                    if reac:
-                        out_vocab[reac] = out_vocab.get(reac, len(out_vocab))
-                    ctx = saida.get("contexto", "")
-                    for token in Token(ctx):
-                        out_vocab[token] = out_vocab.get(token, len(out_vocab))
-            idx_to_out_vocab = {v: k for k, v in out_vocab.items()}
-
-            with torch.no_grad():
-                out = model(x)  # tgt=None para geração autoregressiva
-
-            # Gerar sequência: out["out"] é (batch, max_out_len)
-            generated_logits = out["out"][0]  # (max_out_len,)
-            generated_ids = generated_logits  # floats directly
-
-            # Forçar início na faixa de saída (0.26) para gerar respostas completas
-            generated_ids[0] = 0.26
-
-            # Mapear IDs para tokens, ignorar padding (0)
-            generated_responses = model.decode_tokens(generated_ids, bloco, dominio)
-            generated_text = generated_responses[0] if generated_responses else ""
-
-            # Aplicar variações inconscientes para criatividade na saída
-            if generated_text:
-                response = variar_texto(generated_text, bloco, dominio)
-                # Adicionar frase extra de Multivars_Saída se disponível
-                multivars_saida = bloco["saidas"][0].get("Multivars_Saída", [])
-                if multivars_saida:
-                    extra = random.choice(multivars_saida)
-                    response += " " + extra
-                # Aplicar variações ao response completo
-                response = variar_texto(response, bloco, dominio)
+        if bloco and bloco != "combined":
+            # Determinar se é match exato ou similar
+            is_exato = any(normalize(t) == normalize(txt) for t in [bloco["entrada"]["texto"]] + bloco["entrada"].get("Multivars_Entrada", []) + [variar_texto(bloco["entrada"]["texto"], bloco, dominio, 'entrada')]) and reac == bloco["entrada"].get("reacao", "")
+            resposta_texto = bloco['saidas'][0]['textos'][0]
+            resposta_reacao = bloco['saidas'][0].get('reacao', '')
+            if is_exato:
+                # Match exato: resposta completa
+                response = resposta_texto + (" " + resposta_reacao if resposta_reacao else "")
             else:
-                response = "Resposta gerada vazia."
-
+                # Similar: resposta completa
+                response = resposta_texto + (" " + resposta_reacao if resposta_reacao else "")
+            # Aplicar variação se disponível
+            variations_from_blocks = bloco["saidas"][0]["textos"] + bloco["saidas"][0].get("Multivars_Saída", [])
+            resposta_variada = variar_texto_rag(bloco, dominio, variations_from_blocks)
+            if resposta_variada:
+                response = resposta_variada + (" " + resposta_reacao if resposta_reacao else "")
+            else:
+                response = response
             st.session_state.messages.append({"role": "assistant", "content": response})
             with st.chat_message("assistant"):
                 st.markdown(response)
             # Armazenar a última resposta para like
-            st.session_state.last_response = generated_text
+            st.session_state.last_response = response
             st.session_state.last_bloco_id = str(bloco["bloco_id"])
             # Definir chosen para TTS
             chosen = response
-            # Generate speech - sistema otimizado: Edge TTS para vozes premium, gTTS para leves, pyttsx3 para outras
-            if TTS_AVAILABLE:
-                try:
-                    if voz and voz.startswith('edge-') and EDGE_TTS_AVAILABLE:
-                        # Usar Edge TTS para vozes premium do Microsoft Edge
-                        voice_name = voz.split('-', 1)[1]
-                        
-                        # Mapeamento de códigos de voz simplificados para vozes Edge TTS
-                        
-                        # Vozes Femininas
-                        edge_voice_map_female = {
-                            'pt-br': 'pt-BR-FranciscaNeural',  # Feminina
-                            'pt-pt': 'pt-PT-RaquelNeural',     # Feminina
-                            'en': 'en-US-AriaNeural',          # Feminina
-                            'en-us': 'en-US-AriaNeural',       # Feminina
-                            'en-gb': 'en-GB-SoniaNeural',      # Feminina
-                            'es': 'es-ES-ElviraNeural',        # Feminina
-                            'es-us': 'es-US-PalomaNeural',     # Feminina
-                            'fr': 'fr-FR-DeniseNeural',        # Feminina
-                            'de': 'de-DE-KatjaNeural',         # Feminina
-                            'it': 'it-IT-ElsaNeural',          # Feminina
-                            'ja': 'ja-JP-NanamiNeural',        # Feminina
-                            'ko': 'ko-KR-SunHiNeural',         # Feminina
-                            'ru': 'ru-RU-SvetlanaNeural',      # Feminina
-                            'ar': 'ar-SA-ZariyahNeural',       # Feminina
-                            'hi': 'hi-IN-SwaraNeural',         # Feminina
-                            'female': 'en-US-AriaNeural',      # Feminina
-                        }
-                        
-                        # Vozes Masculinas
-                        edge_voice_map_male = {
-                            'pt-br-male': 'pt-BR-AntonioNeural',    # Masculina
-                            'en-male': 'en-US-AndrewNeural',        # Masculina
-                            'es-male': 'es-ES-AlvaroNeural',        # Masculina
-                            'fr-male': 'fr-FR-HenriNeural',         # Masculina
-                            'de-male': 'de-DE-ConradNeural',        # Masculina
-                            'it-male': 'it-IT-DiegoNeural',         # Masculina
-                            'ja-male': 'ja-JP-KeitaNeural',         # Masculina
-                            'ko-male': 'ko-KR-InJoonNeural',        # Masculina
-                            'ru-male': 'ru-RU-DmitryNeural',        # Masculina
-                            'ar-male': 'ar-SA-HamedNeural',         # Masculina
-                            'hi-male': 'hi-IN-MadhurNeural',        # Masculina
-                            'male': 'en-US-ZiraNeural',             # Masculina (nota: Zira é feminino, mas usado como padrão masculino)
-                        }
-                        
-                        # Combinar dicionários
-                        edge_voice_map = {**edge_voice_map_female, **edge_voice_map_male}
-                        
-                        selected_voice = edge_voice_map.get(voice_name, 'en-US-AriaNeural')
-                        
-                        import asyncio
-                        import io
-                        
-                        async def generate_edge_audio():
-                            communicate = edge_tts.Communicate(chosen, selected_voice)
-                            audio_data = b""
-                            async for chunk in communicate.stream():
-                                if chunk["type"] == "audio":
-                                    audio_data += chunk["data"]
-                            return audio_data
-                        
-                        # Executar de forma síncrona
-                        audio_bytes = asyncio.run(generate_edge_audio())
-                        
-                        if audio_bytes and len(audio_bytes) > 0:
-                            # Armazenar em session_state e reproduzir diretamente
-                            st.session_state.last_audio = audio_bytes
-                            st.audio(st.session_state.last_audio, format='audio/mp3')
-                            st.success(f"🎵 Áudio gerado com Edge TTS '{selected_voice}': {len(audio_bytes)} bytes")
-                        else:
-                            st.error("❌ Falha ao gerar arquivo de áudio com Edge TTS.")
-                    elif voz and voz.startswith('gtts-') and GTTS_AVAILABLE:
-                        lang_code = voz.split('-', 1)[1]
-                        
-                        # Mapear códigos de idioma do gTTS
-                        lang_map = {
-                            'pt-br': 'pt-br',
-                            'pt-pt': 'pt-pt', 
-                            'en': 'en',
-                            'en-us': 'en',
-                            'en-gb': 'en',
-                            'es': 'es',
-                            'es-us': 'es',
-                            'fr': 'fr',
-                            'de': 'de',
-                            'it': 'it',
-                            'ja': 'ja',
-                            'ko': 'ko',
-                            'ru': 'ru',
-                            'ar': 'ar',
-                            'hi': 'hi'
-                        }
-                        
-                        if lang_code in lang_map:
-                            from gtts import gTTS
-                            import io
-                            
-                            # Gerar áudio com gTTS
-                            tts = gTTS(text=chosen, lang=lang_map[lang_code], slow=False)
-                            
-                            # Salvar em buffer de memória
-                            audio_buffer = io.BytesIO()
-                            tts.write_to_fp(audio_buffer)
-                            audio_buffer.seek(0)
-                            audio_bytes = audio_buffer.read()
-                            
-                            if audio_bytes and len(audio_bytes) > 0:
-                                # Armazenar em session_state e reproduzir diretamente
-                                st.session_state.last_audio = audio_bytes
-                                st.audio(st.session_state.last_audio, format='audio/mp3')
-                                st.success(f"🎵 Áudio gerado com gTTS '{lang_code}': {len(audio_bytes)} bytes")
-                            else:
-                                st.error("❌ Falha ao gerar arquivo de áudio com gTTS.")
-                        else:
-                            st.warning(f"Idioma '{lang_code}' não suportado pelo gTTS.")
-                    else:
-                        # Usar pyttsx3 para vozes automáticas ou quando gTTS não disponível
-                        import pyttsx3
-                        engine = pyttsx3.init()
-
-                        # Configurar voz baseada no gênero do IM
-                        voices = engine.getProperty('voices')
-                        if voz:
-                            # Se uma voz específica foi selecionada, tentar usar ela
-                            selected_voice = next((v for v in voices if v.name == voz), voices[0] if voices else None)
-                        else:
-                            # Seleção automática baseada no gênero
-                            if genero == "masculino":
-                                selected_voice = next((v for v in voices if any(k in v.name.lower() for k in ['david', 'mark', 'male', 'paul', 'george'])), voices[0] if voices else None)
-                            elif genero == "feminino":
-                                selected_voice = next((v for v in voices if any(k in v.name.lower() for k in ['maria', 'zira', 'hazel', 'female', 'anna', 'linda'])), voices[0] if voices else None)
-                            else:
-                                selected_voice = random.choice(voices) if voices else None
-
-                        if selected_voice:
-                            engine.setProperty('voice', selected_voice.id)
-                            engine.setProperty('rate', 180)  # Velocidade um pouco mais rápida
-                            engine.setProperty('volume', 0.9)  # Volume alto
-
-                            # Reproduzir diretamente sem salvar arquivo
-                            engine.say(chosen)
-                            engine.runAndWait()
-
-                            st.success(f"🎵 Áudio reproduzido com sucesso! (Voz: {selected_voice.name})")
-                        else:
-                            st.warning("⚠️ Nenhuma voz do sistema encontrada. TTS pode não funcionar corretamente.")
-
-                except Exception as e:
-                    import traceback
-                    st.error(f"Erro ao reproduzir áudio: {str(e)}")
-                    st.error("Detalhes do erro:")
-                    st.code(traceback.format_exc())
-                    st.warning("TTS falhou, mas a conversa continua normalmente.")
+            # Adicionar bloco ao histórico se novo
+            if bloco not in st.session_state.conversa_blocos:
+                st.session_state.conversa_blocos.append(bloco)
+            st.session_state.current_bloco = bloco
+            st.session_state.last_valid = True
             st.rerun()
-        else:
-            # Nenhum bloco encontrado - fluxo interativo para criar novo bloco
-            if "block_creation_step" not in st.session_state:
-                st.session_state.block_creation_step = "waiting_context"
+
+        elif bloco == "combined":
+            # Resposta combinada já definida
+            st.session_state.messages.append({"role": "assistant", "content": response})
+            with st.chat_message("assistant"):
+                st.markdown(response)
+            st.session_state.last_response = response
+            st.rerun()
+
+        # Se nenhum bloco encontrado, ativar Cérbero para aprendizado
+        if bloco is None:
+            if "cerbero_step" not in st.session_state:
+                txt, reac = parse_text_reaction(s)
+                st.session_state.cerbero_step = "collect_text_confirmation"
                 st.session_state.new_input = txt
                 st.session_state.new_reac = reac
-                ai_msg = "🔍 Nenhum bloco encontrado. Sobre o quê é esse assunto?"
+                ai_msg = f'🔍 Não tenho conhecimento sobre isso. Pode por favor confirmar? "{txt}" é um texto correto?'
                 st.session_state.messages.append({"role": "assistant", "content": ai_msg})
                 with st.chat_message("assistant"):
                     st.markdown(ai_msg)
                 st.rerun()
-            elif st.session_state.block_creation_step == "waiting_context":
-                st.session_state.new_contexto = prompt
-                st.session_state.block_creation_step = "waiting_thought"
-                ai_msg = "Obrigado! O quê devo pensar sobre isso?"
-                st.session_state.messages.append({"role": "assistant", "content": ai_msg})
-                with st.chat_message("assistant"):
-                    st.markdown(ai_msg)
-                st.rerun()
-            elif st.session_state.block_creation_step == "waiting_thought":
-                st.session_state.new_pensamento = prompt
-                # Clusterizar/buscar similares
-                similares = []
-                for b in blocos:
-                    sim = calcular_similaridade(b, txt, reac, st.session_state.new_contexto, st.session_state.new_pensamento, dominio)
-                    if sim > 0.1:
-                        similares.append((b, sim))
-                similares.sort(key=lambda x: x[1], reverse=True)
-                
-                # Filtrar por ALNULU
-                similares_filtrados = [b for b, s in similares if abs(len(txt) - b["entrada"]["alnulu"]) <= 100]
-                
-                top_similares = similares_filtrados[:3]
-                
-                if top_similares:
-                    bloco_similar = top_similares[0][0]
-                    proposta_saida = bloco_similar["saidas"][0]["textos"][0]
-                    proposta_reacao = bloco_similar["saidas"][0].get("reacao", "")
-                    proposta_contexto = bloco_similar["saidas"][0].get("contexto", "")
-                    ai_msg = f"📋 Baseado em blocos similares, proponho:\nTexto: {proposta_saida}\nReação: {proposta_reacao}\nContexto: {proposta_contexto}\n\nIsso está de acordo com o que propôs? Responda 'sim' ou 'não'."
+            elif st.session_state.cerbero_step == "collect_text_confirmation":
+                confirmation = parse_quoted_response(prompt).lower().strip()
+                if confirmation in ["sim", "s", "yes", "y", "correto", "certo", "ok"]:
+                    st.session_state.cerbero_step = "collect_reaction_confirmation"
+                    ai_msg = f'Maravilhoso! Então eu presumo que "{st.session_state.new_reac}" seja uma reação. Correto?'
+                    st.session_state.messages.append({"role": "assistant", "content": ai_msg})
+                    with st.chat_message("assistant"):
+                        st.markdown(ai_msg)
+                    st.rerun()
                 else:
-                    proposta_saida = "Entendi sua mensagem. Como posso ajudar?"
-                    proposta_reacao = "😊"
-                    proposta_contexto = "Resposta padrão para entradas não reconhecidas"
-                    ai_msg = f"📋 Nenhum bloco muito similar encontrado. Proponho:\nTexto: {proposta_saida}\nReação: {proposta_reacao}\nContexto: {proposta_contexto}\n\nIsso está de acordo com o que propôs? Responda 'sim' ou 'não'."
-                
-                st.session_state.proposta_saida = proposta_saida
-                st.session_state.proposta_reacao = proposta_reacao
-                st.session_state.proposta_contexto = proposta_contexto
-                st.session_state.block_creation_step = "waiting_approval"
+                    ai_msg = f'❌ Não entendi. Por favor, reformule o texto e envie novamente.'
+                    st.session_state.messages.append({"role": "assistant", "content": ai_msg})
+                    with st.chat_message("assistant"):
+                        st.markdown(ai_msg)
+                    # Reset para permitir nova entrada
+                    for key in ["cerbero_step", "new_input", "new_reac"]:
+                        if key in st.session_state:
+                            del st.session_state[key]
+                    st.rerun()
+            elif st.session_state.cerbero_step == "collect_reaction_confirmation":
+                confirmation = parse_quoted_response(prompt).lower().strip()
+                if confirmation in ["sim", "s", "yes", "y", "correto", "certo", "ok"]:
+                    st.session_state.cerbero_step = "collect_context"
+                    ai_msg = f'Incrível! Qual é o contexto ou situação em que "{st.session_state.new_input}" com emoção "{st.session_state.new_reac}" se aplica?'
+                    st.session_state.messages.append({"role": "assistant", "content": ai_msg})
+                    with st.chat_message("assistant"):
+                        st.markdown(ai_msg)
+                    st.rerun()
+                else:
+                    ai_msg = f'❌ Não percebi a reação. Por favor, reformule a reação e envie novamente.'
+                    st.session_state.messages.append({"role": "assistant", "content": ai_msg})
+                    with st.chat_message("assistant"):
+                        st.markdown(ai_msg)
+                    # Reset para permitir nova entrada
+                    for key in ["cerbero_step", "new_input", "new_reac"]:
+                        if key in st.session_state:
+                            del st.session_state[key]
+                    st.rerun()
+            elif st.session_state.cerbero_step == "collect_context":
+                contexto = parse_quoted_response(prompt)
+                if '"' in prompt:
+                    st.session_state.new_contexto = contexto
+                    st.session_state.cerbero_step = "collect_thought"
+                    ai_msg = f'✅ Contexto coletado: "{contexto}". Agora, o quê devo pensar sobre "{st.session_state.new_input}" que é ligado à emoção "{st.session_state.new_reac}" no contexto "{st.session_state.new_contexto}"?'
+                    st.session_state.messages.append({"role": "assistant", "content": ai_msg})
+                    with st.chat_message("assistant"):
+                        st.markdown(ai_msg)
+                    st.rerun()
+                else:
+                    st.session_state.temp_contexto = contexto
+                    st.session_state.cerbero_step = "confirm_context"
+                    ai_msg = f'O contexto é "{contexto}"? Responda "sim" ou "não".'
+                    st.session_state.messages.append({"role": "assistant", "content": ai_msg})
+                    with st.chat_message("assistant"):
+                        st.markdown(ai_msg)
+                    st.rerun()
+            elif st.session_state.cerbero_step == "confirm_context":
+                confirmation = parse_quoted_response(prompt).lower().strip()
+                if confirmation in ["sim", "s", "yes", "y"]:
+                    st.session_state.new_contexto = st.session_state.temp_contexto
+                    st.session_state.cerbero_step = "collect_thought"
+                    ai_msg = f'Perfeito! O quê devo pensar sobre "{st.session_state.new_input}" que é ligado à emoção "{st.session_state.new_reac}" no contexto "{st.session_state.new_contexto}"?'
+                    st.session_state.messages.append({"role": "assistant", "content": ai_msg})
+                    with st.chat_message("assistant"):
+                        st.markdown(ai_msg)
+                    st.rerun()
+                else:
+                    st.session_state.cerbero_step = "edit_context"
+                    ai_msg = f'Ok, digite o contexto correto:'
+                    st.session_state.messages.append({"role": "assistant", "content": ai_msg})
+                    with st.chat_message("assistant"):
+                        st.markdown(ai_msg)
+                    st.rerun()
+            elif st.session_state.cerbero_step == "edit_context":
+                contexto = parse_quoted_response(prompt)
+                st.session_state.new_contexto = contexto
+                st.session_state.cerbero_step = "collect_thought"
+                ai_msg = f'✅ Contexto corrigido: "{contexto}". Agora, o quê devo pensar sobre "{st.session_state.new_input}" que é ligado à emoção "{st.session_state.new_reac}" no contexto "{st.session_state.new_contexto}"?'
                 st.session_state.messages.append({"role": "assistant", "content": ai_msg})
                 with st.chat_message("assistant"):
                     st.markdown(ai_msg)
                 st.rerun()
-            elif st.session_state.block_creation_step == "waiting_approval":
-                if prompt.lower() in ["sim", "yes", "s", "y", "aprovar", "ok"]:
-                    template = f"""Índice mãe: {dominio}
+            elif st.session_state.cerbero_step == "collect_thought":
+                pensamento = parse_quoted_response(prompt)
+                if '"' in prompt:
+                    st.session_state.new_pensamento = pensamento
+                    st.session_state.cerbero_step = "ask_add_entrada_phrase"
+                    ai_msg = f'✅ Pensamento coletado: "{pensamento}". Quer adicionar uma frase alternativa para entrada? Responda "sim" ou "não".'
+                    st.session_state.messages.append({"role": "assistant", "content": ai_msg})
+                    with st.chat_message("assistant"):
+                        st.markdown(ai_msg)
+                    st.rerun()
+                else:
+                    st.session_state.temp_pensamento = pensamento
+                    st.session_state.cerbero_step = "confirm_thought"
+                    ai_msg = f'O pensamento é "{pensamento}"? Responda "sim" ou "não".'
+                    st.session_state.messages.append({"role": "assistant", "content": ai_msg})
+                    with st.chat_message("assistant"):
+                        st.markdown(ai_msg)
+                    st.rerun()
+            elif st.session_state.cerbero_step == "confirm_thought":
+                confirmation = parse_quoted_response(prompt).lower().strip()
+                if confirmation in ["sim", "s", "yes", "y"]:
+                    st.session_state.new_pensamento = st.session_state.temp_pensamento
+                    st.session_state.cerbero_step = "ask_add_entrada_phrase"
+                    ai_msg = f'✅ Pensamento coletado. Quer adicionar uma frase alternativa para entrada? Responda "sim" ou "não".'
+                    st.session_state.messages.append({"role": "assistant", "content": ai_msg})
+                    with st.chat_message("assistant"):
+                        st.markdown(ai_msg)
+                    st.rerun()
+                else:
+                    st.session_state.cerbero_step = "edit_thought"
+                    ai_msg = f'Ok, digite o pensamento correto:'
+                    st.session_state.messages.append({"role": "assistant", "content": ai_msg})
+                    with st.chat_message("assistant"):
+                        st.markdown(ai_msg)
+                    st.rerun()
+            elif st.session_state.cerbero_step == "edit_thought":
+                pensamento = parse_quoted_response(prompt)
+                st.session_state.new_pensamento = pensamento
+                st.session_state.cerbero_step = "ask_add_entrada_phrase"
+                ai_msg = f'✅ Pensamento corrigido: "{pensamento}". Quer adicionar uma frase alternativa para entrada? Responda "sim" ou "não".'
+                st.session_state.messages.append({"role": "assistant", "content": ai_msg})
+                with st.chat_message("assistant"):
+                    st.markdown(ai_msg)
+                st.rerun()
+            elif st.session_state.cerbero_step == "ask_add_entrada_phrase":
+                confirmation = parse_quoted_response(prompt).lower().strip()
+                if confirmation in ["sim", "s", "yes", "y"]:
+                    st.session_state.cerbero_step = "collect_entrada_phrase"
+                    ai_msg = f'Ok, digite a frase alternativa para entrada:'
+                    st.session_state.messages.append({"role": "assistant", "content": ai_msg})
+                    with st.chat_message("assistant"):
+                        st.markdown(ai_msg)
+                    st.rerun()
+                else:
+                    st.session_state.new_multivars_entrada = []
+                    st.session_state.cerbero_step = "generate_dynamic_response"
+                    # Gerar proposta dinâmica
+                    proposta_autonoma = generate_autonomous_block(st.session_state.new_input, st.session_state.new_reac, st.session_state.new_contexto, st.session_state.new_pensamento, dominio, memoria, st.session_state.get("new_multivars_entrada", []), [])
+                    # Parsear a saída da proposta para obter a resposta dinâmica
+                    saida_texto = proposta_autonoma.split("1. ")[1].split("\n")[0].strip() if "1. " in proposta_autonoma else "Resposta dinâmica gerada."
+                    ai_msg = f'De acordo com a minha reflexão sobre o contexto, a emoção e o texto que me enviou, cheguei a conclusão de que "{saida_texto}" é a ideal. Está de acordo? Responda "sim" ou "não".'
+                    st.session_state.messages.append({"role": "assistant", "content": ai_msg})
+                    with st.chat_message("assistant"):
+                        st.markdown(ai_msg)
+                    st.rerun()
+            elif st.session_state.cerbero_step == "collect_entrada_phrase":
+                frase = parse_quoted_response(prompt)
+                if '"' in prompt:
+                    st.session_state.new_multivars_entrada = [frase]
+                    st.session_state.cerbero_step = "generate_dynamic_response"
+                    # Gerar proposta dinâmica
+                    proposta_autonoma = generate_autonomous_block(st.session_state.new_input, st.session_state.new_reac, st.session_state.new_contexto, st.session_state.new_pensamento, dominio, memoria, st.session_state.get("new_multivars_entrada", []), [])
+                    # Parsear a saída da proposta para obter a resposta dinâmica
+                    saida_texto = proposta_autonoma.split("1. ")[1].split("\n")[0].strip() if "1. " in proposta_autonoma else "Resposta dinâmica gerada."
+                    ai_msg = f'✅ Frase alternativa coletada: "{frase}". De acordo com a minha reflexão, "{saida_texto}" é a ideal. Está de acordo? Responda "sim" ou "não".'
+                    st.session_state.messages.append({"role": "assistant", "content": ai_msg})
+                    with st.chat_message("assistant"):
+                        st.markdown(ai_msg)
+                    st.rerun()
+                else:
+                    st.session_state.temp_frase_entrada = frase
+                    st.session_state.cerbero_step = "confirm_entrada_phrase"
+                    ai_msg = f'A frase alternativa para entrada é "{frase}"? Responda "sim" ou "não".'
+                    st.session_state.messages.append({"role": "assistant", "content": ai_msg})
+                    with st.chat_message("assistant"):
+                        st.markdown(ai_msg)
+                    st.rerun()
+            elif st.session_state.cerbero_step == "confirm_entrada_phrase":
+                confirmation = parse_quoted_response(prompt).lower().strip()
+                if confirmation in ["sim", "s", "yes", "y"]:
+                    st.session_state.new_multivars_entrada = [st.session_state.temp_frase_entrada]
+                    st.session_state.cerbero_step = "generate_dynamic_response"
+                    # Gerar proposta dinâmica
+                    proposta_autonoma = generate_autonomous_block(st.session_state.new_input, st.session_state.new_reac, st.session_state.new_contexto, st.session_state.new_pensamento, dominio, memoria, st.session_state.get("new_multivars_entrada", []), [])
+                    # Parsear a saída da proposta para obter a resposta dinâmica
+                    saida_texto = proposta_autonoma.split("1. ")[1].split("\n")[0].strip() if "1. " in proposta_autonoma else "Resposta dinâmica gerada."
+                    ai_msg = f'De acordo com a minha reflexão sobre o contexto, a emoção e o texto que me enviou, cheguei a conclusão de que "{saida_texto}" é a ideal. Está de acordo? Responda "sim" ou "não".'
+                    st.session_state.messages.append({"role": "assistant", "content": ai_msg})
+                    with st.chat_message("assistant"):
+                        st.markdown(ai_msg)
+                    st.rerun()
+                else:
+                    st.session_state.cerbero_step = "edit_entrada_phrase"
+                    ai_msg = f'Ok, digite a frase alternativa correta:'
+                    st.session_state.messages.append({"role": "assistant", "content": ai_msg})
+                    with st.chat_message("assistant"):
+                        st.markdown(ai_msg)
+                    st.rerun()
+            elif st.session_state.cerbero_step == "edit_entrada_phrase":
+                frase = parse_quoted_response(prompt)
+                st.session_state.new_multivars_entrada = [frase]
+                st.session_state.cerbero_step = "generate_dynamic_response"
+                # Gerar proposta dinâmica
+                proposta_autonoma = generate_autonomous_block(st.session_state.new_input, st.session_state.new_reac, st.session_state.new_contexto, st.session_state.new_pensamento, dominio, memoria, st.session_state.get("new_multivars_entrada", []), [])
+                # Parsear a saída da proposta para obter a resposta dinâmica
+                saida_texto = proposta_autonoma.split("1. ")[1].split("\n")[0].strip() if "1. " in proposta_autonoma else "Resposta dinâmica gerada."
+                ai_msg = f'✅ Frase corrigida: "{frase}". De acordo com a minha reflexão, "{saida_texto}" é a ideal. Está de acordo? Responda "sim" ou "não".'
+                st.session_state.messages.append({"role": "assistant", "content": ai_msg})
+                with st.chat_message("assistant"):
+                    st.markdown(ai_msg)
+                st.rerun()
+            elif st.session_state.cerbero_step == "generate_dynamic_response":
+                confirmation = parse_quoted_response(prompt).lower().strip()
+                if confirmation in ["sim", "s", "yes", "y"]:
+                    # Aceitar e criar o bloco
+                    proposta_autonoma = generate_autonomous_block(st.session_state.new_input, st.session_state.new_reac, st.session_state.new_contexto, st.session_state.new_pensamento, dominio, memoria, st.session_state.get("new_multivars_entrada", []), [])
+                    try:
+                        generate_block_from_template(memoria, proposta_autonoma)
+                        # Agora que o bloco foi criado, encontrar o bloco recém-criado e gerar resposta
+                        blocos = memoria["IM"][dominio]["blocos"]
+                        bloco_novo = blocos[-1]  # Último bloco adicionado
+                        variations_from_blocks = bloco_novo["saidas"][0]["textos"] + bloco_novo["saidas"][0].get("Multivars_Saída", [])
+                        response = variar_texto_rag(bloco_novo, dominio, variations_from_blocks)
+                        st.session_state.messages.append({"role": "assistant", "content": response})
+                        with st.chat_message("assistant"):
+                            st.markdown(response)
+                        # Armazenar a última resposta para like
+                        st.session_state.last_response = response
+                        st.session_state.last_bloco_id = str(bloco_novo["bloco_id"])
+                        # Definir chosen para TTS
+                        chosen = response
+                        # Adicionar bloco_novo ao histórico se novo
+                        if bloco_novo not in st.session_state.conversa_blocos:
+                            st.session_state.conversa_blocos.append(bloco_novo)
+                        st.session_state.current_bloco = bloco_novo
+                        st.session_state.last_valid = True
+                        # Reset Cérbero
+                        for key in ["cerbero_step", "new_input", "new_reac", "new_pensamento"]:
+                            if key in st.session_state:
+                                del st.session_state[key]
+                        st.rerun()
+                    except Exception as e:
+                        ai_msg = f"❌ Erro ao criar bloco autônomo: {e}"
+                        st.session_state.messages.append({"role": "assistant", "content": ai_msg})
+                        with st.chat_message("assistant"):
+                            st.markdown(ai_msg)
+                        st.rerun()
+                else:
+                    st.session_state.cerbero_step = "ask_new_output"
+                    ai_msg = f'Ok, digite uma nova saída ideal:'
+                    st.session_state.messages.append({"role": "assistant", "content": ai_msg})
+                    with st.chat_message("assistant"):
+                        st.markdown(ai_msg)
+                    st.rerun()
+            elif st.session_state.cerbero_step == "ask_new_output":
+                nova_saida = parse_quoted_response(prompt)
+                if '"' in prompt:
+                    st.session_state.new_saida_custom = nova_saida
+                    st.session_state.cerbero_step = "ask_add_saida_phrase"
+                    ai_msg = f'✅ Nova saída coletada: "{nova_saida}". Quer acrescentar uma frase alternativa para saída? Responda "sim" ou "não".'
+                    st.session_state.messages.append({"role": "assistant", "content": ai_msg})
+                    with st.chat_message("assistant"):
+                        st.markdown(ai_msg)
+                    st.rerun()
+                else:
+                    st.session_state.temp_nova_saida = nova_saida
+                    st.session_state.cerbero_step = "confirm_new_output"
+                    ai_msg = f'A nova saída é "{nova_saida}"? Responda "sim" ou "não".'
+                    st.session_state.messages.append({"role": "assistant", "content": ai_msg})
+                    with st.chat_message("assistant"):
+                        st.markdown(ai_msg)
+                    st.rerun()
+            elif st.session_state.cerbero_step == "confirm_new_output":
+                confirmation = parse_quoted_response(prompt).lower().strip()
+                if confirmation in ["sim", "s", "yes", "y"]:
+                    st.session_state.new_saida_custom = st.session_state.temp_nova_saida
+                    st.session_state.cerbero_step = "ask_add_saida_phrase"
+                    ai_msg = f'Quer acrescentar uma frase alternativa para saída? Responda "sim" ou "não".'
+                    st.session_state.messages.append({"role": "assistant", "content": ai_msg})
+                    with st.chat_message("assistant"):
+                        st.markdown(ai_msg)
+                    st.rerun()
+                else:
+                    st.session_state.cerbero_step = "edit_new_output"
+                    ai_msg = f'Ok, digite a nova saída correta:'
+                    st.session_state.messages.append({"role": "assistant", "content": ai_msg})
+                    with st.chat_message("assistant"):
+                        st.markdown(ai_msg)
+                    st.rerun()
+            elif st.session_state.cerbero_step == "edit_new_output":
+                nova_saida = parse_quoted_response(prompt)
+                st.session_state.new_saida_custom = nova_saida
+                st.session_state.cerbero_step = "ask_add_saida_phrase"
+                ai_msg = f'✅ Saída corrigida: "{nova_saida}". Quer acrescentar uma frase alternativa para saída? Responda "sim" ou "não".'
+                st.session_state.messages.append({"role": "assistant", "content": ai_msg})
+                with st.chat_message("assistant"):
+                    st.markdown(ai_msg)
+                st.rerun()
+            elif st.session_state.cerbero_step == "ask_add_saida_phrase":
+                confirmation = parse_quoted_response(prompt).lower().strip()
+                if confirmation in ["sim", "s", "yes", "y"]:
+                    st.session_state.cerbero_step = "collect_saida_phrase"
+                    ai_msg = f'Ok, digite a frase alternativa para saída:'
+                    st.session_state.messages.append({"role": "assistant", "content": ai_msg})
+                    with st.chat_message("assistant"):
+                        st.markdown(ai_msg)
+                    st.rerun()
+                else:
+                    st.session_state.new_multivars_saida = []
+                    # Criar bloco com nova saída
+                    proposta_custom = f"""Índice mãe: {dominio}
 
 Entrada: {st.session_state.new_input}
 
@@ -1554,45 +1845,251 @@ Pensamento Interno: {st.session_state.new_pensamento}
 
 Saída:
 
-1. {st.session_state.proposta_saida}
+1. {st.session_state.new_saida_custom}
 
-Reação: {st.session_state.proposta_reacao}
+Reação: 🤖
 
-Contexto: {st.session_state.proposta_contexto}
+Contexto: Resposta customizada
 """
                     try:
-                        generate_block_from_template(memoria, template)
-                        ai_msg = "✅ Novo bloco criado e salvo com sucesso!"
-                        st.session_state.messages.append({"role": "assistant", "content": ai_msg})
+                        generate_block_from_template(memoria, proposta_custom)
+                        # Agora que o bloco foi criado, encontrar o bloco recém-criado e gerar resposta
+                        blocos = memoria["IM"][dominio]["blocos"]
+                        bloco_novo = blocos[-1]  # Último bloco adicionado
+                        variations_from_blocks = bloco_novo["saidas"][0]["textos"] + bloco_novo["saidas"][0].get("Multivars_Saída", [])
+                        response = variar_texto_rag(bloco_novo, dominio, variations_from_blocks)
+                        st.session_state.messages.append({"role": "assistant", "content": response})
                         with st.chat_message("assistant"):
-                            st.markdown(ai_msg)
-                        # Reset
-                        for key in ["block_creation_step", "new_input", "new_reac", "new_contexto", "new_pensamento", "proposta_saida", "proposta_reacao", "proposta_contexto"]:
+                            st.markdown(response)
+                        # Armazenar a última resposta para like
+                        st.session_state.last_response = response
+                        st.session_state.last_bloco_id = str(bloco_novo["bloco_id"])
+                        # Definir chosen para TTS
+                        chosen = response
+                        # Adicionar bloco_novo ao histórico se novo
+                        if bloco_novo not in st.session_state.conversa_blocos:
+                            st.session_state.conversa_blocos.append(bloco_novo)
+                        st.session_state.current_bloco = bloco_novo
+                        st.session_state.last_valid = True
+                        # Reset Cérbero
+                        for key in ["cerbero_step", "new_input", "new_reac", "new_pensamento", "new_saida_custom"]:
                             if key in st.session_state:
                                 del st.session_state[key]
                         st.rerun()
                     except Exception as e:
-                        ai_msg = f"❌ Erro ao criar bloco: {e}"
+                        ai_msg = f"❌ Erro ao criar bloco custom: {e}"
                         st.session_state.messages.append({"role": "assistant", "content": ai_msg})
                         with st.chat_message("assistant"):
                             st.markdown(ai_msg)
                         st.rerun()
-                elif prompt.lower() in ["não", "no", "n", "nao", "rejeitar"]:
-                    ai_msg = "❌ Bloco rejeitado. Vamos tentar novamente com uma nova entrada."
+            elif st.session_state.cerbero_step == "collect_saida_phrase":
+                frase_saida = parse_quoted_response(prompt)
+                if frase_saida:
+                    if '"' in prompt:
+                        st.session_state.new_multivars_saida = [frase_saida]
+                        # Criar bloco com nova saída e multivars
+                        proposta_custom = f"""Índice mãe: {dominio}
+
+Entrada: {st.session_state.new_input}
+
+Reação: {st.session_state.new_reac}
+
+Contexto: {st.session_state.new_contexto}
+
+Pensamento Interno: {st.session_state.new_pensamento}
+
+Multivars_Entrada: {" | ".join(st.session_state.get("new_multivars_entrada", []))}
+
+Saída:
+
+1. {st.session_state.new_saida_custom}
+
+Multivars_Saída: {" | ".join(st.session_state.new_multivars_saida)}
+
+Reação: 🤖
+
+Contexto: Resposta customizada com multivars
+"""
+                        try:
+                            generate_block_from_template(memoria, proposta_custom)
+                            # Agora que o bloco foi criado, encontrar o bloco recém-criado e gerar resposta
+                            blocos = memoria["IM"][dominio]["blocos"]
+                            bloco_novo = blocos[-1]  # Último bloco adicionado
+                            variations_from_blocks = bloco_novo["saidas"][0]["textos"] + bloco_novo["saidas"][0].get("Multivars_Saída", [])
+                            response = variar_texto_rag(bloco_novo, dominio, variations_from_blocks)
+                            st.session_state.messages.append({"role": "assistant", "content": response})
+                            with st.chat_message("assistant"):
+                                st.markdown(response)
+                            # Armazenar a última resposta para like
+                            st.session_state.last_response = response
+                            st.session_state.last_bloco_id = str(bloco_novo["bloco_id"])
+                            # Definir chosen para TTS
+                            chosen = response
+                            # Adicionar bloco_novo ao histórico se novo
+                            if bloco_novo not in st.session_state.conversa_blocos:
+                                st.session_state.conversa_blocos.append(bloco_novo)
+                            st.session_state.current_bloco = bloco_novo
+                            st.session_state.last_valid = True
+                            # Reset Cérbero
+                            for key in ["cerbero_step", "new_input", "new_reac", "new_pensamento", "new_saida_custom"]:
+                                if key in st.session_state:
+                                    del st.session_state[key]
+                            st.rerun()
+                        except Exception as e:
+                            ai_msg = f"❌ Erro ao criar bloco custom com multivars: {e}"
+                            st.session_state.messages.append({"role": "assistant", "content": ai_msg})
+                            with st.chat_message("assistant"):
+                                st.markdown(ai_msg)
+                            st.rerun()
+                    else:
+                        st.session_state.new_multivars_saida = [frase_saida]
+                        st.session_state.cerbero_step = "confirm_saida_phrase"
+                        ai_msg = f'A frase alternativa para saída é "{frase_saida}". Está correto? Responda "sim" ou "não".'
+                        st.session_state.messages.append({"role": "assistant", "content": ai_msg})
+                        with st.chat_message("assistant"):
+                            st.markdown(ai_msg)
+                        st.rerun()
+                else:
+                    st.session_state.cerbero_step = "edit_saida_phrase"
+                    ai_msg = f'❌ Erro de parsing. Digite a frase alternativa para saída sem aspas.'
                     st.session_state.messages.append({"role": "assistant", "content": ai_msg})
                     with st.chat_message("assistant"):
                         st.markdown(ai_msg)
-                    # Reset
-                    for key in ["block_creation_step", "new_input", "new_reac", "new_contexto", "new_pensamento", "proposta_saida", "proposta_reacao", "proposta_contexto"]:
-                        if key in st.session_state:
-                            del st.session_state[key]
+                    st.rerun()
+            elif st.session_state.cerbero_step == "confirm_saida_phrase":
+                if prompt.lower().strip() in ["sim", "s", "yes", "y", "correto", "ok"]:
+                    # Criar bloco com nova saída e multivars
+                    proposta_custom = f"""Índice mãe: {dominio}
+
+Entrada: {st.session_state.new_input}
+
+Reação: {st.session_state.new_reac}
+
+Contexto: {st.session_state.new_contexto}
+
+Pensamento Interno: {st.session_state.new_pensamento}
+
+Multivars_Entrada: {" | ".join(st.session_state.get("new_multivars_entrada", []))}
+
+Saída:
+
+1. {st.session_state.new_saida_custom}
+
+Multivars_Saída: {" | ".join(st.session_state.new_multivars_saida)}
+
+Reação: 🤖
+
+Contexto: Resposta customizada com multivars
+"""
+                    try:
+                        generate_block_from_template(memoria, proposta_custom)
+                        # Agora que o bloco foi criado, encontrar o bloco recém-criado e gerar resposta
+                        blocos = memoria["IM"][dominio]["blocos"]
+                        bloco_novo = blocos[-1]  # Último bloco adicionado
+                        variations_from_blocks = bloco_novo["saidas"][0]["textos"] + bloco_novo["saidas"][0].get("Multivars_Saída", [])
+                        response = variar_texto_rag(bloco_novo, dominio, variations_from_blocks)
+                        st.session_state.messages.append({"role": "assistant", "content": response})
+                        with st.chat_message("assistant"):
+                            st.markdown(response)
+                        # Armazenar a última resposta para like
+                        st.session_state.last_response = response
+                        st.session_state.last_bloco_id = str(bloco_novo["bloco_id"])
+                        # Definir chosen para TTS
+                        chosen = response
+                        # Adicionar bloco_novo ao histórico se novo
+                        if bloco_novo not in st.session_state.conversa_blocos:
+                            st.session_state.conversa_blocos.append(bloco_novo)
+                        st.session_state.current_bloco = bloco_novo
+                        st.session_state.last_valid = True
+                        # Reset Cérbero
+                        for key in ["cerbero_step", "new_input", "new_reac", "new_pensamento", "new_saida_custom"]:
+                            if key in st.session_state:
+                                del st.session_state[key]
+                        st.rerun()
+                    except Exception as e:
+                        ai_msg = f"❌ Erro ao criar bloco custom com multivars: {e}"
+                        st.session_state.messages.append({"role": "assistant", "content": ai_msg})
+                        with st.chat_message("assistant"):
+                            st.markdown(ai_msg)
+                        st.rerun()
+                elif prompt.lower().strip() in ["não", "n", "no", "nao", "errado", "incorreto"]:
+                    st.session_state.cerbero_step = "edit_saida_phrase"
+                    ai_msg = f'Ok, vamos corrigir. Digite a frase alternativa para saída sem aspas.'
+                    st.session_state.messages.append({"role": "assistant", "content": ai_msg})
+                    with st.chat_message("assistant"):
+                        st.markdown(ai_msg)
                     st.rerun()
                 else:
-                    ai_msg = "Por favor, responda 'sim' ou 'não'."
+                    ai_msg = f'Por favor, responda "sim" ou "não".'
                     st.session_state.messages.append({"role": "assistant", "content": ai_msg})
                     with st.chat_message("assistant"):
                         st.markdown(ai_msg)
                     st.rerun()
+            elif st.session_state.cerbero_step == "edit_saida_phrase":
+                frase_saida = parse_quoted_response(prompt)
+                if frase_saida:
+                    st.session_state.new_multivars_saida = [frase_saida]
+                    # Criar bloco com nova saída e multivars
+                    proposta_custom = f"""Índice mãe: {dominio}
+
+Entrada: {st.session_state.new_input}
+
+Reação: {st.session_state.new_reac}
+
+Contexto: {st.session_state.new_contexto}
+
+Pensamento Interno: {st.session_state.new_pensamento}
+
+Multivars_Entrada: {" | ".join(st.session_state.get("new_multivars_entrada", []))}
+
+Saída:
+
+1. {st.session_state.new_saida_custom}
+
+Multivars_Saída: {" | ".join(st.session_state.new_multivars_saida)}
+
+Reação: 🤖
+
+Contexto: Resposta customizada com multivars
+"""
+                    try:
+                        generate_block_from_template(memoria, proposta_custom)
+                        # Agora que o bloco foi criado, encontrar o bloco recém-criado e gerar resposta
+                        blocos = memoria["IM"][dominio]["blocos"]
+                        bloco_novo = blocos[-1]  # Último bloco adicionado
+                        variations_from_blocks = bloco_novo["saidas"][0]["textos"] + bloco_novo["saidas"][0].get("Multivars_Saída", [])
+                        response = variar_texto_rag(bloco_novo, dominio, variations_from_blocks)
+                        st.session_state.messages.append({"role": "assistant", "content": response})
+                        with st.chat_message("assistant"):
+                            st.markdown(response)
+                        # Armazenar a última resposta para like
+                        st.session_state.last_response = response
+                        st.session_state.last_bloco_id = str(bloco_novo["bloco_id"])
+                        # Definir chosen para TTS
+                        chosen = response
+                        # Adicionar bloco_novo ao histórico se novo
+                        if bloco_novo not in st.session_state.conversa_blocos:
+                            st.session_state.conversa_blocos.append(bloco_novo)
+                        st.session_state.current_bloco = bloco_novo
+                        st.session_state.last_valid = True
+                        # Reset Cérbero
+                        for key in ["cerbero_step", "new_input", "new_reac", "new_pensamento", "new_saida_custom"]:
+                            if key in st.session_state:
+                                del st.session_state[key]
+                        st.rerun()
+                    except Exception as e:
+                        ai_msg = f"❌ Erro ao criar bloco custom com multivars: {e}"
+                        st.session_state.messages.append({"role": "assistant", "content": ai_msg})
+                        with st.chat_message("assistant"):
+                            st.markdown(ai_msg)
+                        st.rerun()
+                else:
+                    ai_msg = f'❌ Ainda erro. Tente novamente sem aspas.'
+                    st.session_state.messages.append({"role": "assistant", "content": ai_msg})
+                    with st.chat_message("assistant"):
+                        st.markdown(ai_msg)
+                    st.rerun()
+
 
     # Botão Enter para gerar variações se há bloco atual e última entrada foi válida
     if st.session_state.current_bloco and st.session_state.last_valid:
@@ -1603,166 +2100,166 @@ Contexto: {st.session_state.proposta_contexto}
                     with torch.no_grad():
                         out = model(x)  # tgt=None para geração autoregressiva
 
-                # Gerar sequência: out["out"] é (batch, max_out_len, out_vocab_size)
-                generated_logits = out["out"][0]  # (max_out_len, out_vocab_size)
-                generated_ids = generated_logits  # floats directly
+                    # Gerar sequência: out["out"] é (batch, max_out_len, out_vocab_size)
+                    generated_logits = out["out"][0]  # (max_out_len, out_vocab_size)
+                    generated_ids = generated_logits  # floats directly
 
-                # Forçar início na faixa de saída (0.26) para gerar respostas completas
-                generated_ids[0] = 0.26
+                    # Forçar início na faixa de saída (0.26) para gerar respostas completas
+                    generated_ids[0] = 0.26
 
-                # Decodificar IDs para texto usando o vocabulário do modelo
-                generated_responses = model.decode_tokens(generated_ids, bloco, dominio)
-                generated_text = generated_responses[0] if generated_responses else ""
+                    # Decodificar IDs para texto usando o vocabulário do modelo
+                    generated_responses = model.decode_tokens(generated_ids, bloco, dominio)
+                    generated_text = generated_responses[0] if generated_responses else ""
 
-                # Aplicar variações inconscientes para criatividade na saída
-                bloco = st.session_state.current_bloco
-                if generated_text:
-                    response = variar_texto(generated_text, bloco, dominio)
-                    # Adicionar frase extra de Multivars_Saída se disponível
-                    multivars_saida = bloco["saidas"][0].get("Multivars_Saída", [])
-                    if multivars_saida:
-                        extra = random.choice(multivars_saida)
-                        response += " " + extra
-                    # Aplicar variações ao response completo
-                    response = variar_texto(response, bloco, dominio)
-                else:
-                    response = "Resposta gerada vazia."
+                    # Aplicar variações inconscientes para criatividade na saída
+                    bloco = st.session_state.current_bloco
+                    if generated_text:
+                        response = variar_texto(generated_text, bloco, dominio)
+                        # Adicionar frase extra de Multivars_Saída se disponível
+                        multivars_saida = bloco["saidas"][0].get("Multivars_Saída", [])
+                        if multivars_saida:
+                            extra = random.choice(multivars_saida)
+                            response += " " + extra
+                        # Aplicar variações ao response completo
+                        response = variar_texto(response, bloco, dominio)
+                    else:
+                        response = "Resposta gerada vazia."
 
-                st.session_state.messages.append({"role": "assistant", "content": response})
-                with st.chat_message("assistant"):
-                    st.markdown(response)
-                # Armazenar a última resposta para like
-                st.session_state.last_response = generated_text
-                st.session_state.last_bloco_id = str(st.session_state.current_bloco["bloco_id"])
-                st.session_state.last_button = "Enter"
-                # Incrementar variação para próxima vez (removido, agora random)
-                # Generate speech - sistema híbrido: Edge TTS para premium, gTTS para leves, pyttsx3 para outras
-                chosen = response
-                if TTS_AVAILABLE and voz:
-                    try:
-                        if voz.startswith('edge-') and EDGE_TTS_AVAILABLE:
-                            # Usar Edge TTS para vozes premium
-                            voice_name = voz.split('-', 1)[1]
-                            
-                            edge_voice_map = {
-                                'pt-br': 'pt-BR-FranciscaNeural',  # Feminina
-                                'pt-pt': 'pt-PT-RaquelNeural',     # Feminina
-                                'en': 'en-US-AriaNeural',          # Feminina
-                                'en-us': 'en-US-AriaNeural',       # Feminina
-                                'en-gb': 'en-GB-SoniaNeural',      # Feminina
-                                'es': 'es-ES-ElviraNeural',        # Feminina
-                                'es-us': 'es-US-PalomaNeural',     # Feminina
-                                'fr': 'fr-FR-DeniseNeural',        # Feminina
-                                'de': 'de-DE-KatjaNeural',         # Feminina
-                                'it': 'it-IT-ElsaNeural',          # Feminina
-                                'ja': 'ja-JP-NanamiNeural',        # Feminina
-                                'ko': 'ko-KR-SunHiNeural',         # Feminina
-                                'ru': 'ru-RU-SvetlanaNeural',      # Feminina
-                                'ar': 'ar-SA-ZariyahNeural',       # Feminina
-                                'hi': 'hi-IN-SwaraNeural',         # Feminina
-                                'female': 'en-US-AriaNeural',      # Feminina
-                                'pt-br-male': 'pt-BR-AntonioNeural',    # Masculina
-                                'en-male': 'en-US-AndrewNeural',        # Masculina
-                                'es-male': 'es-ES-AlvaroNeural',        # Masculina
-                                'fr-male': 'fr-FR-HenriNeural',         # Masculina
-                                'de-male': 'de-DE-ConradNeural',        # Masculina
-                                'it-male': 'it-IT-DiegoNeural',         # Masculina
-                                'ja-male': 'ja-JP-KeitaNeural',         # Masculina
-                                'ko-male': 'ko-KR-InJoonNeural',        # Masculina
-                                'ru-male': 'ru-RU-DmitryNeural',        # Masculina
-                                'ar-male': 'ar-SA-HamedNeural',         # Masculina
-                                'hi-male': 'hi-IN-MadhurNeural',        # Masculina
-                                'male': 'en-US-ZiraNeural',             # Masculina (nota: Zira é feminino, mas usado como padrão masculino)
-                            }
-                            
-                            selected_voice = edge_voice_map.get(voice_name, 'en-US-AriaNeural')
-                            
-                            import asyncio
-                            import io
-                            
-                            async def generate_edge_audio():
-                                communicate = edge_tts.Communicate(chosen, selected_voice)
-                                audio_data = b""
-                                async for chunk in communicate.stream():
-                                    if chunk["type"] == "audio":
-                                        audio_data += chunk["data"]
-                                return audio_data
-                            
-                            audio_bytes = asyncio.run(generate_edge_audio())
-                            
-                            if audio_bytes and len(audio_bytes) > 0:
-                                st.session_state.last_audio = audio_bytes
-                                st.audio(st.session_state.last_audio, format='audio/mp3')
-                                st.success(f"🎵 Áudio gerado com Edge TTS '{selected_voice}': {len(audio_bytes)} bytes")
-                            else:
-                                st.error("❌ Falha ao gerar arquivo de áudio com Edge TTS.")
-                        elif voz.startswith('gtts-') and GTTS_AVAILABLE:
-                            # Usar gTTS para vozes leves
-                            lang_code = voz.split('-', 1)[1]
-                            
-                            lang_map = {
-                                'pt-br': 'pt-br', 'pt-pt': 'pt-pt', 'en': 'en', 'en-us': 'en', 'en-gb': 'en',
-                                'es': 'es', 'es-us': 'es', 'fr': 'fr', 'de': 'de', 'it': 'it', 'ja': 'ja',
-                                'ko': 'ko', 'ru': 'ru', 'ar': 'ar', 'hi': 'hi'
-                            }
-                            
-                            if lang_code in lang_map:
-                                from gtts import gTTS
+                    st.session_state.messages.append({"role": "assistant", "content": response})
+                    with st.chat_message("assistant"):
+                        st.markdown(response)
+                    # Armazenar a última resposta para like
+                    st.session_state.last_response = generated_text
+                    st.session_state.last_bloco_id = str(st.session_state.current_bloco["bloco_id"])
+                    st.session_state.last_button = "Enter"
+                    # Incrementar variação para próxima vez (removido, agora random)
+                    # Generate speech - sistema híbrido: Edge TTS para premium, gTTS para leves, pyttsx3 para outras
+                    chosen = response
+                    if TTS_AVAILABLE and voz:
+                        try:
+                            if voz.startswith('edge-') and EDGE_TTS_AVAILABLE:
+                                # Usar Edge TTS para vozes premium
+                                voice_name = voz.split('-', 1)[1]
+                                
+                                edge_voice_map = {
+                                    'pt-br': 'pt-BR-FranciscaNeural',  # Feminina
+                                    'pt-pt': 'pt-PT-RaquelNeural',     # Feminina
+                                    'en': 'en-US-AriaNeural',          # Feminina
+                                    'en-us': 'en-US-AriaNeural',       # Feminina
+                                    'en-gb': 'en-GB-SoniaNeural',      # Feminina
+                                    'es': 'es-ES-ElviraNeural',        # Feminina
+                                    'es-us': 'es-US-PalomaNeural',     # Feminina
+                                    'fr': 'fr-FR-DeniseNeural',        # Feminina
+                                    'de': 'de-DE-KatjaNeural',         # Feminina
+                                    'it': 'it-IT-ElsaNeural',          # Feminina
+                                    'ja': 'ja-JP-NanamiNeural',        # Feminina
+                                    'ko': 'ko-KR-SunHiNeural',         # Feminina
+                                    'ru': 'ru-RU-SvetlanaNeural',      # Feminina
+                                    'ar': 'ar-SA-ZariyahNeural',       # Feminina
+                                    'hi': 'hi-IN-SwaraNeural',         # Feminina
+                                    'female': 'en-US-AriaNeural',      # Feminina
+                                    'pt-br-male': 'pt-BR-AntonioNeural',    # Masculina
+                                    'en-male': 'en-US-AndrewNeural',        # Masculina
+                                    'es-male': 'es-ES-AlvaroNeural',        # Masculina
+                                    'fr-male': 'fr-FR-HenriNeural',         # Masculina
+                                    'de-male': 'de-DE-ConradNeural',        # Masculina
+                                    'it-male': 'it-IT-DiegoNeural',         # Masculina
+                                    'ja-male': 'ja-JP-KeitaNeural',         # Masculina
+                                    'ko-male': 'ko-KR-InJoonNeural',        # Masculina
+                                    'ru-male': 'ru-RU-DmitryNeural',        # Masculina
+                                    'ar-male': 'ar-SA-HamedNeural',         # Masculina
+                                    'hi-male': 'hi-IN-MadhurNeural',        # Masculina
+                                    'male': 'en-US-ZiraNeural',             # Masculina (nota: Zira é feminino, mas usado como padrão masculino)
+                                }
+                                
+                                selected_voice = edge_voice_map.get(voice_name, 'en-US-AriaNeural')
+                                
+                                import asyncio
                                 import io
                                 
-                                tts = gTTS(text=chosen, lang=lang_map[lang_code], slow=False)
-                                audio_buffer = io.BytesIO()
-                                tts.write_to_fp(audio_buffer)
-                                audio_buffer.seek(0)
-                                audio_bytes = audio_buffer.read()
+                                async def generate_edge_audio():
+                                    communicate = edge_tts.Communicate(chosen, selected_voice)
+                                    audio_data = b""
+                                    async for chunk in communicate.stream():
+                                        if chunk["type"] == "audio":
+                                            audio_data += chunk["data"]
+                                    return audio_data
+                                
+                                audio_bytes = asyncio.run(generate_edge_audio())
                                 
                                 if audio_bytes and len(audio_bytes) > 0:
                                     st.session_state.last_audio = audio_bytes
                                     st.audio(st.session_state.last_audio, format='audio/mp3')
-                                    st.success(f"🎵 Áudio gerado com gTTS '{lang_code}': {len(audio_bytes)} bytes")
+                                    st.success(f"🎵 Áudio gerado com Edge TTS '{selected_voice}': {len(audio_bytes)} bytes")
                                 else:
-                                    st.error("❌ Falha ao gerar arquivo de áudio com gTTS.")
-                            else:
-                                st.warning(f"Idioma '{lang_code}' não suportado pelo gTTS.")
-                        else:
-                            # Usar pyttsx3 para outras vozes
-                            import pyttsx3
-                            engine = pyttsx3.init()
-
-                            voices = engine.getProperty('voices')
-                            if voz.startswith('tortoise-'):
-                                voice_name = voz.split('-', 1)[1]
-                                if 'emma' in voice_name.lower() or 'female' in voice_name.lower():
-                                    selected_voice = next((v for v in voices if any(k in v.name.lower() for k in ['maria', 'zira', 'hazel', 'female', 'anna', 'linda'])), voices[0] if voices else None)
+                                    st.error("❌ Falha ao gerar arquivo de áudio com Edge TTS.")
+                            elif voz.startswith('gtts-') and GTTS_AVAILABLE:
+                                # Usar gTTS para vozes leves
+                                lang_code = voz.split('-', 1)[1]
+                                
+                                lang_map = {
+                                    'pt-br': 'pt-br', 'pt-pt': 'pt-pt', 'en': 'en', 'en-us': 'en', 'en-gb': 'en',
+                                    'es': 'es', 'es-us': 'es', 'fr': 'fr', 'de': 'de', 'it': 'it', 'ja': 'ja',
+                                    'ko': 'ko', 'ru': 'ru', 'ar': 'ar', 'hi': 'hi'
+                                }
+                                
+                                if lang_code in lang_map:
+                                    from gtts import gTTS
+                                    import io
+                                    
+                                    tts = gTTS(text=chosen, lang=lang_map[lang_code], slow=False)
+                                    audio_buffer = io.BytesIO()
+                                    tts.write_to_fp(audio_buffer)
+                                    audio_buffer.seek(0)
+                                    audio_bytes = audio_buffer.read()
+                                    
+                                    if audio_bytes and len(audio_bytes) > 0:
+                                        st.session_state.last_audio = audio_bytes
+                                        st.audio(st.session_state.last_audio, format='audio/mp3')
+                                        st.success(f"🎵 Áudio gerado com gTTS '{lang_code}': {len(audio_bytes)} bytes")
+                                    else:
+                                        st.error("❌ Falha ao gerar arquivo de áudio com gTTS.")
                                 else:
-                                    selected_voice = next((v for v in voices if any(k in v.name.lower() for k in ['david', 'mark', 'male', 'paul', 'george'])), voices[0] if voices else None)
+                                    st.warning(f"Idioma '{lang_code}' não suportado pelo gTTS.")
                             else:
-                                selected_voice = next((v for v in voices if v.name == voz), voices[0] if voices else None)
+                                # Usar pyttsx3 para outras vozes
+                                import pyttsx3
+                                engine = pyttsx3.init()
 
-                            if not selected_voice and not voz.startswith('tortoise-'):
-                                if genero == "masculino":
-                                    selected_voice = next((v for v in voices if any(k in v.name.lower() for k in ['david', 'mark', 'male', 'paul', 'george'])), voices[0] if voices else None)
-                                elif genero == "feminino":
-                                    selected_voice = next((v for v in voices if any(k in v.name.lower() for k in ['maria', 'zira', 'hazel', 'female', 'anna', 'linda'])), voices[0] if voices else None)
+                                voices = engine.getProperty('voices')
+                                if voz.startswith('tortoise-'):
+                                    voice_name = voz.split('-', 1)[1]
+                                    if 'emma' in voice_name.lower() or 'female' in voice_name.lower():
+                                        selected_voice = next((v for v in voices if any(k in v.name.lower() for k in ['maria', 'zira', 'hazel', 'female', 'anna', 'linda'])), voices[0] if voices else None)
+                                    else:
+                                        selected_voice = next((v for v in voices if any(k in v.name.lower() for k in ['david', 'mark', 'male', 'paul', 'george'])), voices[0] if voices else None)
                                 else:
-                                    selected_voice = random.choice(voices) if voices else None
+                                    selected_voice = next((v for v in voices if v.name == voz), voices[0] if voices else None)
 
-                            if selected_voice:
-                                engine.setProperty('voice', selected_voice.id)
-                                engine.setProperty('rate', 180)
-                                engine.setProperty('volume', 0.9)
-                                engine.say(chosen)
-                                engine.runAndWait()
-                                st.success(f"🎵 Áudio reproduzido com sucesso! (Voz: {selected_voice.name})")
-                            else:
-                                st.warning("⚠️ Nenhuma voz do sistema encontrada.")
+                                if not selected_voice and not voz.startswith('tortoise-'):
+                                    if genero == "masculino":
+                                        selected_voice = next((v for v in voices if any(k in v.name.lower() for k in ['david', 'mark', 'male', 'paul', 'george'])), voices[0] if voices else None)
+                                    elif genero == "feminino":
+                                        selected_voice = next((v for v in voices if any(k in v.name.lower() for k in ['maria', 'zira', 'hazel', 'female', 'anna', 'linda'])), voices[0] if voices else None)
+                                    else:
+                                        selected_voice = random.choice(voices) if voices else None
 
-                    except Exception as e:
-                        import traceback
-                        st.error(f"Erro ao reproduzir áudio: {str(e)}")
-                        st.error("Detalhes do erro:")
-                        st.code(traceback.format_exc())
-                        st.warning("TTS falhou, mas a conversa continua normalmente.")
+                                if selected_voice:
+                                    engine.setProperty('voice', selected_voice.id)
+                                    engine.setProperty('rate', 180)
+                                    engine.setProperty('volume', 0.9)
+                                    engine.say(chosen)
+                                    engine.runAndWait()
+                                    st.success(f"🎵 Áudio reproduzido com sucesso! (Voz: {selected_voice.name})")
+                                else:
+                                    st.warning("⚠️ Nenhuma voz do sistema encontrada.")
+
+                        except Exception as e:
+                            import traceback
+                            st.error(f"Erro ao reproduzir áudio: {str(e)}")
+                            st.error("Detalhes do erro:")
+                            st.code(traceback.format_exc())
+                            st.warning("TTS falhou, mas a conversa continua normalmente.")
         with col2:
             if st.button("💡 Insight", key="insight_button"):
                 bloco = st.session_state.current_bloco
@@ -2806,6 +3303,7 @@ def generate_block_from_template(memoria: dict, template: str) -> None:
     entrada_reacao = ""
     entrada_contexto = ""
     entrada_pensamento = ""
+    entrada_multivars = []
     saidas_textos = []
     saida_reacao = ""
     saida_contexto = ""
@@ -2847,12 +3345,17 @@ def generate_block_from_template(memoria: dict, template: str) -> None:
         elif line.startswith("Pensamento Interno:"):
             entrada_pensamento = line.split(":", 1)[1].strip()
             current_field = "pensamento"
+        elif line.startswith("Multivars_Entrada:"):
+            entrada_multivars = [v.strip() for v in line.split(":", 1)[1].split("|") if v.strip()]
+            current_field = "multivars"
         elif current_field == "reacao":
             entrada_reacao += " " + line
         elif current_field == "contexto":
             entrada_contexto += " " + line
         elif current_field == "pensamento":
             entrada_pensamento += " " + line
+        elif current_field == "multivars":
+            entrada_multivars.extend([v.strip() for v in line.split("|") if v.strip()])
         else:
             # Assume que é continuação do texto de entrada
             if entrada_texto:
@@ -2902,6 +3405,7 @@ def generate_block_from_template(memoria: dict, template: str) -> None:
             "reacao": entrada_reacao,
             "contexto": entrada_contexto,
             "pensamento_interno": entrada_pensamento,
+            "Multivars_Entrada": entrada_multivars,
             "tokens": {},
             "fim": "",
             "alnulu": len(entrada_texto)
@@ -3232,58 +3736,369 @@ def submenu_backup(memoria: dict, inconsciente: dict) -> None:
     
     with col3:
         if st.button("💾 Fazer Backup Manual"):
-            # Salvar backups manuais com timestamp
+            # Salvar backups manuais com timestamp na pasta backup
             import time
             timestamp = int(time.time())
-            backup_memoria_file = f"Adam_Lovely_memory_manual_backup_{timestamp}.json"
-            backup_inconsciente_file = f"Adam_Lovely_inconscious_manual_backup_{timestamp}.json"
+            backup_memoria_file = f"backup/Adam_Lovely_memory_manual_backup_{timestamp}.json"
+            backup_inconsciente_file = f"backup/Adam_Lovely_inconscious_manual_backup_{timestamp}.json"
             salvar_json(backup_memoria_file, memoria)
             salvar_json(backup_inconsciente_file, inconsciente)
-            st.success(f"✅ Backups manuais salvos: {backup_memoria_file} e {backup_inconsciente_file}")
+            st.success(f"✅ Backups manuais salvos na pasta backup: {backup_memoria_file} e {backup_inconsciente_file}")
     
     st.warning("⚠️ **Atenção:** 'Reiniciar Sessão' limpa todos os dados não salvos. Faça backup antes!")
 
 
-def submenu_evoluir(memoria: dict) -> None:
-    st.subheader("🚀 Evoluir IA - Aprimoramentos Avançados")
-    st.write("Aqui você pode aplicar evoluções à sua IA, mantendo a estrutura INSEPA sem seq2seq ou GPT.")
+def submenu_testar_adam(memoria: dict, inconsciente: dict) -> None:
+    st.subheader("🧪 Testar Adam Afiado com ALNULU")
+    st.write("Teste prático do sistema refinado: match exato, similaridade ALNULU, reflexão e geração autônoma.")
     
-    # Selecionar domínio
-    dom = prompt_dominio("evoluir", memoria)
-    if not dom:
+    dominio = prompt_dominio("testar", memoria)
+    if not dominio:
         return
     
-    st.write(f"Evoluindo IA para o domínio: {dom}")
+    st.write(f"Testando no domínio: {dominio}")
     
-    # Opções de evolução
-    evolucao = st.selectbox("Escolha uma evolução:", [
-        "🔄 Fine-tuning com Likes",
-        "🧠 Aumentar Capacidade do Modelo",
-        "📈 Adicionar Novos Blocos Dinamicamente",
-        "🤔 Melhorar Autoconsciência"
-    ])
-    
-    if evolucao == "🔄 Fine-tuning com Likes":
-        if "fine_tune_data" in st.session_state and st.session_state.fine_tune_data:
-            fine_tune_model(memoria, dom, st.session_state.fine_tune_data)
-            st.success("✅ Fine-tuning aplicado com dados de likes!")
+    # Teste 1: Match Exato
+    st.subheader("1. Match Exato")
+    txt_exato = st.text_input("Digite input exato (ex: Olá Sr. Vampiro ^^):", key="txt_exato")
+    if txt_exato:
+        parts = txt_exato.rsplit(" ", 1)
+        if len(parts) == 2:
+            txt, reac = parts
         else:
-            st.info("Nenhum dado de like disponível para fine-tuning.")
+            txt, reac = txt_exato, ""
+        blocos = memoria["IM"][dominio]["blocos"]
+        bloco_exato = None
+        for b in blocos:
+            if b["entrada"]["texto"] == txt and b["entrada"].get("reacao") == reac:
+                bloco_exato = b
+                break
+        if bloco_exato:
+            st.success(f"✅ Match exato: '{txt} {reac}' → '{bloco_exato['saidas'][0]['textos'][0]}'")
+        else:
+            st.warning(f"❌ Nenhum match exato para '{txt} {reac}'")
     
-    elif evolucao == "🧠 Aumentar Capacidade do Modelo":
-        st.write("Aumentando camadas do transformer e hidden dim.")
-        # Aqui, recriar modelo com parâmetros maiores (simulado)
-        st.info("Para aumentar capacidade, edite EMBED_DIM e HIDDEN_DIM no código e retreine.")
+    # Teste 2: Similaridade ALNULU
+    st.subheader("2. Similaridade ALNULU")
+    txt_sim = st.text_input("Digite input para similaridade (ex: Oiee ^^):", key="txt_sim")
+    if txt_sim:
+        # Parsing inicial para reação global se aplicável
+        full_input = txt_sim
+        reac_sim = ""
+        blocos = memoria["IM"][dominio]["blocos"]
+        for b in blocos:
+            bloco_reac = b["entrada"].get("reacao", "").lower().strip()
+            if bloco_reac and full_input.lower().strip().endswith(bloco_reac):
+                reac_sim = bloco_reac
+                txt_sim = full_input[:-len(bloco_reac)].rstrip()
+                break
+        ctx_sim = ""  # Ainda opcional
+        
+        # Dividir input em partes baseadas em reações encontradas
+        partes = []
+        remaining = txt_sim
+        while remaining:
+            found = False
+            for b in blocos:
+                bloco_reac = b["entrada"].get("reacao", "").strip()
+                if bloco_reac and len(bloco_reac) > 1 and bloco_reac in remaining:  # Só dividir em reações com mais de 1 char
+                    idx = remaining.find(bloco_reac)
+                    if idx > 0:
+                        parte = remaining[:idx + len(bloco_reac)].strip()
+                        partes.append(parte)
+                        remaining = remaining[idx + len(bloco_reac):].strip().lstrip(".,!? ")
+                        found = True
+                        break
+            if not found:
+                if remaining.strip():
+                    partes.append(remaining.strip())
+                break
+        if not partes:
+            partes = [txt_sim]
+        # Se há reac_sim, adicionar à última parte
+        if reac_sim and partes:
+            partes[-1] += " " + reac_sim
+        
+        # Para cada parte, fazer análise isolada
+        respostas_combinadas = []
+        for i, parte in enumerate(partes, 1):
+            st.subheader(f"Bloco {i}: '{parte}'")
+            # Extrair reação da parte
+            reac_parte = ""
+            for b in blocos:
+                bloco_reac = b["entrada"].get("reacao", "").lower().strip()
+                if bloco_reac and parte.lower().strip().endswith(bloco_reac):
+                    reac_parte = bloco_reac
+                    parte_clean = parte[:-len(bloco_reac)].rstrip()
+                    break
+            else:
+                parte_clean = parte
+            
+            # Buscar similar para esta parte
+            similares = retrieve_similar_blocks_alnulu(parte_clean, reac_parte, ctx_sim, "", dominio, top_k=1)
+            if similares:
+                sim_score, bloco_sim = similares[0]
+                st.info(f"🔍 Melhor match (score: {sim_score:.2f}): '{bloco_sim['entrada']['texto']} {bloco_sim['entrada'].get('reacao', '')}'")
+                # Reflexão para esta parte
+                has_reac = bool(reac_parte.strip())
+                has_ctx = bool(ctx_sim.strip())
+                if has_reac and has_ctx:
+                    reflexao = "Isso é um conhecimento concreto: tem texto, reação, contexto e significado."
+                else:
+                    reflexao = "Isso é uma opinião: só tem texto (e talvez reação), baseado em similaridade."
+                st.write(f"Reflexão: {reflexao}")
+                # Resposta sugerida para esta parte
+                resposta_texto = bloco_sim['saidas'][0]['textos'][0]
+                resposta_reacao = bloco_sim['saidas'][0].get('reacao', '')
+                texto_exato = normalize(parte_clean) == normalize(bloco_sim['entrada']['texto'])
+                reacao_exata = reac_parte == bloco_sim['entrada'].get('reacao', '')
+                if reacao_exata:
+                    resposta = resposta_texto + (" " + resposta_reacao if resposta_reacao else "")
+                elif texto_exato:
+                    palavras_resposta = Token(resposta_texto)
+                    metade = max(1, len(palavras_resposta) // 2)
+                    resposta = ' '.join(palavras_resposta[:metade]) + (" " + resposta_reacao if resposta_reacao else "")
+                else:
+                    primeira_palavra = resposta_texto.split()[0] if resposta_texto.split() else resposta_texto
+                    resposta = primeira_palavra + (" " + resposta_reacao if resposta_reacao else "")
+                st.write(f"Resposta sugerida: {resposta}")
+                respostas_combinadas.append(resposta)
+            else:
+                st.warning(f"❌ Nenhum bloco similar encontrado para '{parte}'.")
+        
+        if respostas_combinadas:
+            st.write(f"Resposta combinada: {' '.join(respostas_combinadas)}")
     
-    elif evolucao == "📈 Adicionar Novos Blocos Dinamicamente":
-        st.write("Adicionando blocos baseados em interações recentes.")
-        # Lógica para gerar novos blocos (placeholder)
-        st.info("Funcionalidade em desenvolvimento.")
+    # Teste 3: Geração Autônoma
+    st.subheader("3. Geração Autônoma")
+    txt_auto = st.text_input("Texto para autonomia:", key="txt_auto")
+    reac_auto = st.text_input("Reação:", key="reac_auto")
+    ctx_auto = st.text_input("Contexto:", key="ctx_auto")
+    thought_auto = st.text_input("Pensamento:", key="thought_auto")
+    if st.button("Gerar Autônomo"):
+        proposta = generate_autonomous_block(txt_auto, reac_auto, ctx_auto, thought_auto, dominio, memoria)
+        st.code(proposta, language="text")
     
-    elif evolucao == "🤔 Melhorar Autoconsciência":
-        st.write("Expandindo reflexões com análise de sentimento.")
-        # Melhorar gerar_reflexao
-        st.info("Reflexões aprimoradas aplicadas.")
+    # Teste 4: Encoding ALNULU
+    st.subheader("4. Encoding ALNULU")
+    word1 = st.text_input("Palavra 1:", key="word1")
+    word2 = st.text_input("Palavra 2:", key="word2")
+    if word1 and word2:
+        vec1 = alnulu_encode(word1)
+        vec2 = alnulu_encode(word2)
+        sim = alnulu_similarity(vec1, vec2)
+        st.write(f"Vetor '{word1}': {vec1}")
+        st.write(f"Vetor '{word2}': {vec2}")
+        st.write(f"Similaridade: {sim:.2f}")
+    
+    st.success("🎉 Teste concluído! Adam afiado na prática. :3 <3")
+
+
+def generate_autonomous_block(entrada_texto: str, entrada_reacao: str, entrada_contexto: str, entrada_pensamento: str, dominio: str, memoria: dict, entrada_multivars: list = None, multivars_saida: list = None) -> str:
+    """Gera um bloco INSEPA automaticamente usando o modelo treinado para autonomia real, não hardcoded."""
+    ckpt = ckpt_path(dominio)
+    if not os.path.exists(ckpt):
+        # Fallback para hardcoded se não há modelo
+        return f"""Índice mãe: {dominio}
+
+Entrada: {entrada_texto}
+
+Reação: {entrada_reacao}
+
+Contexto: {entrada_contexto}
+
+Pensamento Interno: {entrada_pensamento}
+
+Saída:
+
+1. Modelo não treinado ainda. Treine primeiro para autonomia completa.
+
+Reação: 🤖
+
+Contexto: Fallback autônomo
+"""
+
+    # Carregar modelo para geração autônoma
+    data = torch.load(ckpt)
+    if len(data) == 20:
+        (state, maxE, maxRE, maxCE, maxPIDE, mom_size, val_to_idx_E, val_to_idx_RE, val_to_idx_CE, val_to_idx_PIDE,
+         vE, vRE, vCE, vPIDE, n_txt, max_out_len, max_ng, vS, all_out_markers, idx_to_txt) = data
+    elif len(data) == 19:
+        (state, maxE, maxRE, maxCE, maxPIDE, mom_size, val_to_idx_E, val_to_idx_RE, val_to_idx_CE, val_to_idx_PIDE,
+         vE, vRE, vCE, vPIDE, n_txt, max_out_len, max_ng, vS, all_out_markers) = data
+        idx_to_txt = {v: k for k, v in vS.items()}
+    else:
+        return f"""Índice mãe: {dominio}
+
+Entrada: {entrada_texto}
+
+Reação: {entrada_reacao}
+
+Contexto: {entrada_contexto}
+
+Pensamento Interno: {entrada_pensamento}
+
+Saída:
+
+1. Checkpoint incompatível.
+
+Reação: ❌
+
+Contexto: Erro de carregamento
+"""
+
+    out_vocab_size = n_txt
+    n_emo = 1
+    n_ctx = 1
+
+    model = AdamSegmentado(
+        nE=len(vE), nRE=len(vRE), nCE=len(vCE), nPIDE=len(vPIDE),
+        mom_size=mom_size,
+        num_vals_E=len(val_to_idx_E), num_vals_RE=len(val_to_idx_RE),
+        num_vals_CE=len(val_to_idx_CE), num_vals_PIDE=len(val_to_idx_PIDE),
+        out_vocab_size=out_vocab_size, max_out_len=max_out_len,
+        max_E=maxE, max_RE=maxRE, max_CE=maxCE, max_PIDE=maxPIDE, max_ng=max_ng
+    )
+    model.load_state_dict(state)
+    model.v_txt = vS
+    model.idx_to_txt = idx_to_txt
+    if all_out_markers:
+        model.all_out_markers = all_out_markers
+    model.eval()
+
+    # Preparar entrada para o modelo (usar entrada atual como base)
+    universo = memoria["IM"][dominio]
+    blocos = universo["blocos"]
+    if not blocos:
+        return f"""Índice mãe: {dominio}
+
+Entrada: {entrada_texto}
+
+Reação: {entrada_reacao}
+
+Contexto: {entrada_contexto}
+
+Pensamento Interno: {entrada_pensamento}
+
+Saída:
+
+1. Nenhum bloco existente para basear autonomia.
+
+Reação: 📭
+
+Contexto: Base vazia
+"""
+
+    # Usar o último bloco como base para geração autônoma
+    bloco_base = blocos[-1]
+
+    # Calcular start_value baseado no fim das saídas do último bloco
+    fim_saida_ultimo = float(bloco_base["saidas"][0]["fim"])
+    start_value = fim_saida_ultimo + 0.01
+
+    # Featurizar entrada autônoma
+    E = Token(entrada_texto)
+    RE = [entrada_reacao] if entrada_reacao else []
+    CE = Token(entrada_contexto)
+    pensamento_limpo = entrada_pensamento.strip('"')
+    partes = pensamento_limpo.split('.')[:3]
+    PIDE_full = []
+    for parte in partes:
+        PIDE_full.extend(Token(parte.strip()))
+    PIDE_limited = PIDE_full[:3]
+
+    # Usar dimensões do modelo treinado (do checkpoint)
+    # maxE, maxRE, maxCE, maxPIDE já carregados do checkpoint
+
+    # Pad/truncate
+    def pad_list(lst, max_len):
+        return (lst + [0] * max_len)[:max_len]
+
+    E_ids = pad_list([vE.get(ng, vE.get(UNK, 0)) for t in E for ng in generate_ngrams(t, N_GRAM)], maxE * max_ng)
+    E_val_idxs = pad_list([val_to_idx_E.get(t, 0) for t in E], maxE)
+    E_vals = pad_list([0.0] * len(E), maxE)  # Placeholder, since tokens are strings
+    E_moms = pad_list([0] * len(E), maxE)  # Placeholder
+    E_pos = pad_list([0.0] * len(E), maxE)  # Simplificado
+
+    RE_ids = pad_list([vRE.get(ng, vRE.get(UNK, 0)) for t in RE for ng in generate_ngrams(t, N_GRAM)], maxRE * max_ng)
+    RE_val_idxs = pad_list([val_to_idx_RE.get(t, 0) for t in RE], maxRE)
+    RE_vals = pad_list([0.0] * len(RE), maxRE)  # Placeholder
+    RE_moms = pad_list([0] * len(RE), maxRE)
+    RE_pos = pad_list([0.0] * len(RE), maxRE)
+
+    CE_ids = pad_list([vCE.get(ng, vCE.get(UNK, 0)) for t in CE for ng in generate_ngrams(t, N_GRAM)], maxCE * max_ng)
+    CE_val_idxs = pad_list([val_to_idx_CE.get(t, 0) for t in CE], maxCE)
+    CE_vals = pad_list([0.0] * len(CE), maxCE)  # Placeholder
+    CE_moms = pad_list([0] * len(CE), maxCE)
+    CE_pos = pad_list([0.0] * len(CE), maxCE)
+
+    PI_ids = pad_list([vPIDE.get(ng, vPIDE.get(UNK, 0)) for t in PIDE_limited for ng in generate_ngrams(t, N_GRAM)], maxPIDE * max_ng)
+    PI_val_idxs = pad_list([val_to_idx_PIDE.get(t, 0) for t in PIDE_limited], maxPIDE)
+    PI_vals = pad_list([0.0] * len(PIDE_limited), maxPIDE)  # Placeholder
+    PI_moms = pad_list([0] * len(PIDE_limited), maxPIDE)
+    PI_pos = pad_list([0.0] * len(PIDE_limited), maxPIDE)
+
+    x = {
+        "E": torch.tensor([E_ids], dtype=torch.long),
+        "E_val": torch.tensor([E_vals], dtype=torch.float32),
+        "E_mom": torch.tensor([E_moms], dtype=torch.long),
+        "E_pos": torch.tensor([E_pos], dtype=torch.float32),
+        "E_val_idx": torch.tensor([E_val_idxs], dtype=torch.long),
+        "RE": torch.tensor([RE_ids], dtype=torch.long),
+        "RE_val": torch.tensor([RE_vals], dtype=torch.float32),
+        "RE_mom": torch.tensor([RE_moms], dtype=torch.long),
+        "RE_pos": torch.tensor([RE_pos], dtype=torch.float32),
+        "RE_val_idx": torch.tensor([RE_val_idxs], dtype=torch.long),
+        "CE": torch.tensor([CE_ids], dtype=torch.long),
+        "CE_val": torch.tensor([CE_vals], dtype=torch.float32),
+        "CE_mom": torch.tensor([CE_moms], dtype=torch.long),
+        "CE_pos": torch.tensor([CE_pos], dtype=torch.float32),
+        "CE_val_idx": torch.tensor([CE_val_idxs], dtype=torch.long),
+        "PIDE": torch.tensor([PI_ids], dtype=torch.long),
+        "PIDE_val": torch.tensor([PI_vals], dtype=torch.float32),
+        "PIDE_mom": torch.tensor([PI_moms], dtype=torch.long),
+        "PIDE_pos": torch.tensor([PI_pos], dtype=torch.float32),
+        "PIDE_val_idx": torch.tensor([PI_val_idxs], dtype=torch.long),
+    }
+
+    with torch.no_grad():
+        out = model(x, start_value=start_value)
+
+    # Gerar resposta autônoma
+    generated_logits = out["out"][0]
+    generated_ids = generated_logits
+
+    # Decodificar para autonomia (usar bloco=None)
+    generated_responses = model.decode_tokens(generated_ids, None, dominio)
+    saida_texto = generated_responses[0] if generated_responses else "Resposta autônoma gerada."
+
+    # Reação e contexto autônomos (simplificados)
+    saida_reacao = "🤖"  # Autônomo
+    saida_contexto = "Resposta gerada autonomamente pelo modelo treinado"
+
+    template = f"""Índice mãe: {dominio}
+
+Entrada: {entrada_texto}
+
+Reação: {entrada_reacao}
+
+Contexto: {entrada_contexto}
+
+Pensamento Interno: {entrada_pensamento}
+
+Saída:
+
+1. {saida_texto}
+
+Reação: {saida_reacao}
+
+Contexto: {saida_contexto}
+"""
+    if entrada_multivars:
+        template = template.replace("Pensamento Interno: {entrada_pensamento}", f"Pensamento Interno: {entrada_pensamento}\n\nMultivars_Entrada: {' | '.join(entrada_multivars)}")
+    if multivars_saida:
+        template = template.replace("Reação: {saida_reacao}", f"Reação: {saida_reacao}\n\nMultivars_Saída: {' | '.join(multivars_saida)}")
+    return template
 
 
 def main():
@@ -3352,6 +4167,8 @@ def main():
             st.session_state.menu = "treinar"
         if st.button("🧪 Testar"):
             st.session_state.menu = "testar"
+        if st.button("🧪 Testar Adam Afiado"):
+            st.session_state.menu = "testar_adam"
         if st.button("💬 Conversar"):
             st.session_state.menu = "conversar"
         if st.button("📊 Estatísticas"):
@@ -3404,8 +4221,8 @@ def main():
                 st.error(f"❌ Domínio '{dom}' não encontrado.")
     elif st.session_state.menu == "estatisticas":
         submenu_estatisticas(memoria)
-    elif st.session_state.menu == "evoluir":
-        submenu_evoluir(memoria)
+    elif st.session_state.menu == "testar_adam":
+        submenu_testar_adam(memoria, inconsciente)
 
 
 if __name__ == "__main__":
