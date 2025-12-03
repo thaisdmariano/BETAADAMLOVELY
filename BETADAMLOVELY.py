@@ -2272,36 +2272,38 @@ Contexto: Resposta customizada com multivars
                                     st.warning(f"Idioma '{lang_code}' não suportado pelo gTTS.")
                             else:
                                 # Usar pyttsx3 para outras vozes
-                                import pyttsx3
-                                engine = pyttsx3.init()
-
-                                voices = engine.getProperty('voices')
-                                if voz.startswith('tortoise-'):
-                                    voice_name = voz.split('-', 1)[1]
-                                    if 'emma' in voice_name.lower() or 'female' in voice_name.lower():
-                                        selected_voice = next((v for v in voices if any(k in v.name.lower() for k in ['maria', 'zira', 'hazel', 'female', 'anna', 'linda'])), voices[0] if voices else None)
+                                try:
+                                    import pyttsx3
+                                    engine = pyttsx3.init()
+                                    voices = engine.getProperty('voices')
+                                    if voz.startswith('tortoise-'):
+                                        voice_name = voz.split('-', 1)[1]
+                                        if 'emma' in voice_name.lower() or 'female' in voice_name.lower():
+                                            selected_voice = next((v for v in voices if any(k in v.name.lower() for k in ['maria', 'zira', 'hazel', 'female', 'anna', 'linda'])), voices[0] if voices else None)
+                                        else:
+                                            selected_voice = next((v for v in voices if any(k in v.name.lower() for k in ['david', 'mark', 'male', 'paul', 'george'])), voices[0] if voices else None)
                                     else:
-                                        selected_voice = next((v for v in voices if any(k in v.name.lower() for k in ['david', 'mark', 'male', 'paul', 'george'])), voices[0] if voices else None)
-                                else:
-                                    selected_voice = next((v for v in voices if v.name == voz), voices[0] if voices else None)
+                                        selected_voice = next((v for v in voices if v.name == voz), voices[0] if voices else None)
 
-                                if not selected_voice and not voz.startswith('tortoise-'):
-                                    if genero == "masculino":
-                                        selected_voice = next((v for v in voices if any(k in v.name.lower() for k in ['david', 'mark', 'male', 'paul', 'george'])), voices[0] if voices else None)
-                                    elif genero == "feminino":
-                                        selected_voice = next((v for v in voices if any(k in v.name.lower() for k in ['maria', 'zira', 'hazel', 'female', 'anna', 'linda'])), voices[0] if voices else None)
+                                    if not selected_voice and not voz.startswith('tortoise-'):
+                                        if genero == "masculino":
+                                            selected_voice = next((v for v in voices if any(k in v.name.lower() for k in ['david', 'mark', 'male', 'paul', 'george'])), voices[0] if voices else None)
+                                        elif genero == "feminino":
+                                            selected_voice = next((v for v in voices if any(k in v.name.lower() for k in ['maria', 'zira', 'hazel', 'female', 'anna', 'linda'])), voices[0] if voices else None)
+                                        else:
+                                            selected_voice = random.choice(voices) if voices else None
+
+                                    if selected_voice:
+                                        engine.setProperty('voice', selected_voice.id)
+                                        engine.setProperty('rate', 180)
+                                        engine.setProperty('volume', 0.9)
+                                        engine.say(chosen)
+                                        engine.runAndWait()
+                                        st.success(f"🎵 Áudio reproduzido com sucesso! (Voz: {selected_voice.name})")
                                     else:
-                                        selected_voice = random.choice(voices) if voices else None
-
-                                if selected_voice:
-                                    engine.setProperty('voice', selected_voice.id)
-                                    engine.setProperty('rate', 180)
-                                    engine.setProperty('volume', 0.9)
-                                    engine.say(chosen)
-                                    engine.runAndWait()
-                                    st.success(f"🎵 Áudio reproduzido com sucesso! (Voz: {selected_voice.name})")
-                                else:
-                                    st.warning("⚠️ Nenhuma voz do sistema encontrada.")
+                                        st.warning("⚠️ Nenhuma voz do sistema encontrada.")
+                                except RuntimeError:
+                                    st.warning("⚠️ pyttsx3 não disponível neste ambiente. TTS pulado.")
 
                         except Exception as e:
                             import traceback
@@ -2410,36 +2412,38 @@ Contexto: Resposta customizada com multivars
                                     st.warning(f"Idioma '{lang_code}' não suportado pelo gTTS.")
                             else:
                                 # Usar pyttsx3 para outras vozes
-                                import pyttsx3
-                                engine = pyttsx3.init()
-
-                                voices = engine.getProperty('voices')
-                                if voz.startswith('tortoise-'):
-                                    voice_name = voz.split('-', 1)[1]
-                                    if 'emma' in voice_name.lower() or 'female' in voice_name.lower():
-                                        selected_voice = next((v for v in voices if any(k in v.name.lower() for k in ['maria', 'zira', 'hazel', 'female', 'anna', 'linda'])), voices[0] if voices else None)
+                                try:
+                                    import pyttsx3
+                                    engine = pyttsx3.init()
+                                    voices = engine.getProperty('voices')
+                                    if voz.startswith('tortoise-'):
+                                        voice_name = voz.split('-', 1)[1]
+                                        if 'emma' in voice_name.lower() or 'female' in voice_name.lower():
+                                            selected_voice = next((v for v in voices if any(k in v.name.lower() for k in ['maria', 'zira', 'hazel', 'female', 'anna', 'linda'])), voices[0] if voices else None)
+                                        else:
+                                            selected_voice = next((v for v in voices if any(k in v.name.lower() for k in ['david', 'mark', 'male', 'paul', 'george'])), voices[0] if voices else None)
                                     else:
-                                        selected_voice = next((v for v in voices if any(k in v.name.lower() for k in ['david', 'mark', 'male', 'paul', 'george'])), voices[0] if voices else None)
-                                else:
-                                    selected_voice = next((v for v in voices if v.name == voz), voices[0] if voices else None)
+                                        selected_voice = next((v for v in voices if v.name == voz), voices[0] if voices else None)
 
-                                if not selected_voice and not voz.startswith('tortoise-'):
-                                    if genero == "masculino":
-                                        selected_voice = next((v for v in voices if any(k in v.name.lower() for k in ['david', 'mark', 'male', 'paul', 'george'])), voices[0] if voices else None)
-                                    elif genero == "feminino":
-                                        selected_voice = next((v for v in voices if any(k in v.name.lower() for k in ['maria', 'zira', 'hazel', 'female', 'anna', 'linda'])), voices[0] if voices else None)
+                                    if not selected_voice and not voz.startswith('tortoise-'):
+                                        if genero == "masculino":
+                                            selected_voice = next((v for v in voices if any(k in v.name.lower() for k in ['david', 'mark', 'male', 'paul', 'george'])), voices[0] if voices else None)
+                                        elif genero == "feminino":
+                                            selected_voice = next((v for v in voices if any(k in v.name.lower() for k in ['maria', 'zira', 'hazel', 'female', 'anna', 'linda'])), voices[0] if voices else None)
+                                        else:
+                                            selected_voice = random.choice(voices) if voices else None
+
+                                    if selected_voice:
+                                        engine.setProperty('voice', selected_voice.id)
+                                        engine.setProperty('rate', 180)
+                                        engine.setProperty('volume', 0.9)
+                                        engine.say(insight_msg)
+                                        engine.runAndWait()
+                                        st.success(f"🎵 Áudio reproduzido com sucesso! (Voz: {selected_voice.name})")
                                     else:
-                                        selected_voice = random.choice(voices) if voices else None
-
-                                if selected_voice:
-                                    engine.setProperty('voice', selected_voice.id)
-                                    engine.setProperty('rate', 180)
-                                    engine.setProperty('volume', 0.9)
-                                    engine.say(insight_msg)
-                                    engine.runAndWait()
-                                    st.success(f"🎵 Áudio reproduzido com sucesso! (Voz: {selected_voice.name})")
-                                else:
-                                    st.warning("⚠️ Nenhuma voz do sistema encontrada.")
+                                        st.warning("⚠️ Nenhuma voz do sistema encontrada.")
+                                except RuntimeError:
+                                    st.warning("⚠️ pyttsx3 não disponível neste ambiente. TTS pulado.")
                         except Exception as e:
                             import traceback
                             st.error(f"Erro ao reproduzir áudio: {str(e)}")
@@ -2800,12 +2804,16 @@ def create_new_im(memoria: dict) -> None:
     genero = st.selectbox("Gênero do IM:", ["masculino", "feminino", "não binário", "outro"], key="new_im_genero")
     voz = None
     if TTS_AVAILABLE:
-        import pyttsx3
-        engine = pyttsx3.init()
-        voices = engine.getProperty('voices')
+        try:
+            import pyttsx3
+            engine = pyttsx3.init()
+            voices = engine.getProperty('voices')
+            voice_options = [v.name for v in voices if v]
+        except RuntimeError:
+            voice_options = []
         gtts_voices = ['gtts-pt-br', 'gtts-pt-pt', 'gtts-en', 'gtts-en-us', 'gtts-en-gb', 'gtts-es', 'gtts-es-us', 'gtts-fr', 'gtts-de', 'gtts-it', 'gtts-ja', 'gtts-ko', 'gtts-ru', 'gtts-ar', 'gtts-hi']
         coqui_voices = ['tts_models/pt/cv/vits', 'tts_models/en/ljspeech/tacotron2-DDC_ph']
-        voice_options = [v.name for v in voices if v] + gtts_voices + [f"coqui-{cv}" for cv in coqui_voices]
+        voice_options += gtts_voices + [f"coqui-{cv}" for cv in coqui_voices]
         voz = st.selectbox("Voz preferida (opcional):", ["Automático"] + voice_options, key="new_im_voz")
         if voz == "Automático":
             voz = None
