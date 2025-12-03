@@ -1,0 +1,6 @@
+streamlit
+torch
+numpy
+pyttsx3
+gtts
+edge-tts
