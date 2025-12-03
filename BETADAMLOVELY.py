@@ -1,3 +1,4 @@
+
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
@@ -1130,13 +1131,14 @@ def retrieve_similar_blocks_alnulu(txt: str, reac: str, contexto: str, thought: 
         bloco_ctx_vec = alnulu_encode(bloco["entrada"].get("contexto", ""))
         bloco_thought_vec = alnulu_encode(bloco["entrada"].get("pensamento_interno", ""))
         
-        # Similaridade por campo (pesos ajustados: contexto 0.4, reação 0.3, texto 0.2, pensamento 0.1)
-        txt_sim = alnulu_similarity(txt_vec, bloco_txt_vec)
+        # Similaridade por campo (pesos ajustados para priorizar emoções: reação 0.5, contexto 0.3, texto 0.1, pensamento 0.1)
+        txt_sim = similaridade_palavras(txt, bloco["entrada"]["texto"])
         reac_sim = alnulu_similarity(reac_vec, bloco_reac_vec)
         ctx_sim = alnulu_similarity(ctx_vec, bloco_ctx_vec)
         thought_sim = alnulu_similarity(thought_vec, bloco_thought_vec)
         
-        overall_sim = 0.2 * txt_sim + 0.3 * reac_sim + 0.4 * ctx_sim + 0.1 * thought_sim
+        # Similaridade por campo (pesos ajustados: texto 0.4, reação 0.3, contexto 0.2, pensamento 0.1)
+        overall_sim = 0.4 * txt_sim + 0.3 * reac_sim + 0.2 * ctx_sim + 0.1 * thought_sim
         
         # Bônus por concretude: se bloco tem contexto e pensamento, +0.1
         concretude_bonus = 0.1 if bloco["entrada"].get("contexto") and bloco["entrada"].get("pensamento_interno") else 0.0
@@ -1432,7 +1434,7 @@ def infer(memoria: dict, dominio: str) -> None:
         if bloco is None and txt and reac:
             # Dividir input em partes baseadas em reações encontradas, como no teste
             partes = []
-            remaining = txt
+            remaining = s  # Usar o input original para incluir reações
             while remaining:
                 found = False
                 for b in blocos:
@@ -1450,7 +1452,7 @@ def infer(memoria: dict, dominio: str) -> None:
                         partes.append(remaining.strip())
                     break
             if not partes:
-                partes = [txt]
+                partes = [s]
             # Não adicionar reac global
             
             respostas_combinadas = []
@@ -1460,23 +1462,63 @@ def infer(memoria: dict, dominio: str) -> None:
                 
                 similares = retrieve_similar_blocks_alnulu(parte_clean, parte_reac, "", "", dominio, top_k=1)
                 if similares:
-                    bloco_sim = similares[0][1]
-                    resposta_texto = bloco_sim['saidas'][0]['textos'][0]
-                    resposta_reacao = bloco_sim['saidas'][0].get('reacao', '')
-                    resposta = resposta_texto + (" " + resposta_reacao if resposta_reacao else "")
-                    variations_from_blocks = bloco_sim["saidas"][0]["textos"] + bloco_sim["saidas"][0].get("Multivars_Saída", [])
-                    resposta_variada = variar_texto_rag(bloco_sim, dominio, variations_from_blocks)
-                    if resposta_variada:
-                        resposta = resposta_variada + (" " + resposta_reacao if resposta_reacao else "")
+                    sim_score, bloco_sim = similares[0]
+                    if sim_score < 0.5:
+                        # Alucinação detectada: resposta genérica/fraca
+                        resposta = "Estou alucinando... Vamos aprender juntos?"
+                    else:
+                        resposta_texto = bloco_sim['saidas'][0]['textos'][0]
+                        resposta_reacao = bloco_sim['saidas'][0].get('reacao', '')
+                        texto_exato = normalize(parte_clean) == normalize(bloco_sim['entrada']['texto'])
+                        reacao_exata = parte_reac == bloco_sim['entrada'].get('reacao', '')
+                        if reacao_exata:
+                            resposta = resposta_texto + (" " + resposta_reacao if resposta_reacao else "")
+                        elif texto_exato:
+                            palavras_resposta = Token(resposta_texto)
+                            metade = max(1, len(palavras_resposta) // 2)
+                            resposta = ' '.join(palavras_resposta[:metade]) + (" " + resposta_reacao if resposta_reacao else "")
+                        else:
+                            primeira_palavra = resposta_texto.split()[0] if resposta_texto.split() else resposta_texto
+                            resposta = primeira_palavra + (" " + resposta_reacao if resposta_reacao else "")
                     respostas_combinadas.append(resposta)
             
             if respostas_combinadas:
                 response = ' '.join(respostas_combinadas)
                 bloco = "combined"
+                # Se todas as partes alucinaram, ativar Cerbero
+                if all(r == "Estou alucinando... Vamos aprender juntos?" for r in respostas_combinadas):
+                    bloco = None
         elif bloco is None:
             # st.write("### 2. Similaridade ALNULU")  # Removido
-            # st.info("Reação vazia ou não aplicável, pulando similaridade.")  # Removido
-            pass
+            similares = retrieve_similar_blocks_alnulu(txt, reac, "", "", dominio, top_k=1)
+            if similares:
+                sim_score, bloco_sim = similares[0]
+                if sim_score < 0.5:
+                    # Alucinação detectada: resposta genérica/fraca
+                    response = "Estou alucinando... Vamos aprender juntos?"
+                    bloco = None  # Para ativar Cerbero
+                else:
+                    resposta_texto = bloco_sim['saidas'][0]['textos'][0]
+                    resposta_reacao = bloco_sim['saidas'][0].get('reacao', '')
+                    texto_exato = normalize(txt) == normalize(bloco_sim['entrada']['texto'])
+                    reacao_exata = reac == bloco_sim['entrada'].get('reacao', '')
+                    if reacao_exata:
+                        resposta = resposta_texto + (" " + resposta_reacao if resposta_reacao else "")
+                    elif texto_exato:
+                        palavras_resposta = Token(resposta_texto)
+                        metade = max(1, len(palavras_resposta) // 2)
+                        resposta = ' '.join(palavras_resposta[:metade]) + (" " + resposta_reacao if resposta_reacao else "")
+                    else:
+                        primeira_palavra = resposta_texto.split()[0] if resposta_texto.split() else resposta_texto
+                        resposta = primeira_palavra + (" " + resposta_reacao if resposta_reacao else "")
+                    response = resposta
+                    # Detectar alucinação interna: se resposta base é "A" ou "O", ativar Cerbero
+                    if resposta_texto.strip() in ["A", "O"]:
+                        bloco = None  # Tratar como não encontrado para aprendizado
+                    else:
+                        bloco = bloco_sim
+            else:
+                bloco = None
 
         if bloco and bloco != "combined":
             # Determinar se é match exato ou similar
@@ -1496,6 +1538,9 @@ def infer(memoria: dict, dominio: str) -> None:
                 response = resposta_variada + (" " + resposta_reacao if resposta_reacao else "")
             else:
                 response = response
+            # Detectar alucinação interna: se resposta base é "A" ou "O", ativar Cerbero
+            if resposta_texto.strip() in ["A", "O"]:
+                bloco = None  # Tratar como não encontrado para aprendizado
             st.session_state.messages.append({"role": "assistant", "content": response})
             with st.chat_message("assistant"):
                 st.markdown(response)
@@ -1518,6 +1563,10 @@ def infer(memoria: dict, dominio: str) -> None:
                 st.markdown(response)
             st.session_state.last_response = response
             st.rerun()
+
+        # Detectar bloco de fallback e ativar Cerbero
+        if isinstance(bloco, dict) and bloco["entrada"]["texto"] == "Dado sem padrão" and bloco["entrada"].get("reacao") == "Não definida" and bloco["entrada"].get("contexto") == "Dado sem exatidão ou similaridade.":
+            bloco = None  # Tratar como não encontrado para ativar aprendizado
 
         # Se nenhum bloco encontrado, ativar Cérbero para aprendizado
         if bloco is None:
@@ -1574,7 +1623,7 @@ def infer(memoria: dict, dominio: str) -> None:
                 if '"' in prompt:
                     st.session_state.new_contexto = contexto
                     st.session_state.cerbero_step = "collect_thought"
-                    ai_msg = f'✅ Contexto coletado: "{contexto}". Agora, o quê devo pensar sobre "{st.session_state.new_input}" que é ligado à emoção "{st.session_state.new_reac}" no contexto "{st.session_state.new_contexto}"?'
+                    ai_msg = f'Ótimo! Agora que temos a expressão "{st.session_state.new_input}" ligada à emoção "{st.session_state.new_reac}" e o contexto "{st.session_state.new_contexto}". O quê devo pensar a respeito do assunto?'
                     st.session_state.messages.append({"role": "assistant", "content": ai_msg})
                     with st.chat_message("assistant"):
                         st.markdown(ai_msg)
@@ -1608,7 +1657,7 @@ def infer(memoria: dict, dominio: str) -> None:
                 contexto = parse_quoted_response(prompt)
                 st.session_state.new_contexto = contexto
                 st.session_state.cerbero_step = "collect_thought"
-                ai_msg = f'✅ Contexto corrigido: "{contexto}". Agora, o quê devo pensar sobre "{st.session_state.new_input}" que é ligado à emoção "{st.session_state.new_reac}" no contexto "{st.session_state.new_contexto}"?'
+                ai_msg = f'Ótimo! Agora que temos a expressão "{st.session_state.new_input}" ligada à emoção "{st.session_state.new_reac}" e o contexto "{st.session_state.new_contexto}". O quê devo pensar a respeito do assunto?'
                 st.session_state.messages.append({"role": "assistant", "content": ai_msg})
                 with st.chat_message("assistant"):
                     st.markdown(ai_msg)
@@ -1618,7 +1667,7 @@ def infer(memoria: dict, dominio: str) -> None:
                 if '"' in prompt:
                     st.session_state.new_pensamento = pensamento
                     st.session_state.cerbero_step = "ask_add_entrada_phrase"
-                    ai_msg = f'✅ Pensamento coletado: "{pensamento}". Quer adicionar uma frase alternativa para entrada? Responda "sim" ou "não".'
+                    ai_msg = f'"{pensamento}". Quer adicionar uma frase alternativa para entrada? Responda "sim" ou "não".'
                     st.session_state.messages.append({"role": "assistant", "content": ai_msg})
                     with st.chat_message("assistant"):
                         st.markdown(ai_msg)
@@ -1636,7 +1685,7 @@ def infer(memoria: dict, dominio: str) -> None:
                 if confirmation in ["sim", "s", "yes", "y"]:
                     st.session_state.new_pensamento = st.session_state.temp_pensamento
                     st.session_state.cerbero_step = "ask_add_entrada_phrase"
-                    ai_msg = f'✅ Pensamento coletado. Quer adicionar uma frase alternativa para entrada? Responda "sim" ou "não".'
+                    ai_msg = f' Quer adicionar uma frase alternativa para entrada? Responda "sim" ou "não".'
                     st.session_state.messages.append({"role": "assistant", "content": ai_msg})
                     with st.chat_message("assistant"):
                         st.markdown(ai_msg)
@@ -1652,7 +1701,7 @@ def infer(memoria: dict, dominio: str) -> None:
                 pensamento = parse_quoted_response(prompt)
                 st.session_state.new_pensamento = pensamento
                 st.session_state.cerbero_step = "ask_add_entrada_phrase"
-                ai_msg = f'✅ Pensamento corrigido: "{pensamento}". Quer adicionar uma frase alternativa para entrada? Responda "sim" ou "não".'
+                ai_msg = f' "{pensamento}". Quer adicionar uma frase alternativa para entrada? Responda "sim" ou "não".'
                 st.session_state.messages.append({"role": "assistant", "content": ai_msg})
                 with st.chat_message("assistant"):
                     st.markdown(ai_msg)
@@ -1687,7 +1736,7 @@ def infer(memoria: dict, dominio: str) -> None:
                     proposta_autonoma = generate_autonomous_block(st.session_state.new_input, st.session_state.new_reac, st.session_state.new_contexto, st.session_state.new_pensamento, dominio, memoria, st.session_state.get("new_multivars_entrada", []), [])
                     # Parsear a saída da proposta para obter a resposta dinâmica
                     saida_texto = proposta_autonoma.split("1. ")[1].split("\n")[0].strip() if "1. " in proposta_autonoma else "Resposta dinâmica gerada."
-                    ai_msg = f'✅ Frase alternativa coletada: "{frase}". De acordo com a minha reflexão, "{saida_texto}" é a ideal. Está de acordo? Responda "sim" ou "não".'
+                    ai_msg = f' "{frase}". De acordo com a minha reflexão, "{saida_texto}" é a ideal. Está de acordo? Responda "sim" ou "não".'
                     st.session_state.messages.append({"role": "assistant", "content": ai_msg})
                     with st.chat_message("assistant"):
                         st.markdown(ai_msg)
@@ -3850,17 +3899,22 @@ def submenu_testar_adam(memoria: dict, inconsciente: dict) -> None:
                 # Resposta sugerida para esta parte
                 resposta_texto = bloco_sim['saidas'][0]['textos'][0]
                 resposta_reacao = bloco_sim['saidas'][0].get('reacao', '')
-                texto_exato = normalize(parte_clean) == normalize(bloco_sim['entrada']['texto'])
-                reacao_exata = reac_parte == bloco_sim['entrada'].get('reacao', '')
-                if reacao_exata:
-                    resposta = resposta_texto + (" " + resposta_reacao if resposta_reacao else "")
-                elif texto_exato:
-                    palavras_resposta = Token(resposta_texto)
-                    metade = max(1, len(palavras_resposta) // 2)
-                    resposta = ' '.join(palavras_resposta[:metade]) + (" " + resposta_reacao if resposta_reacao else "")
+                # Detectar alucinação no teste: se score < 0.8, indica similaridade fraca/genérica
+                if sim_score < 0.5:
+                    st.error(f"🚨 Alucinação detectada! Score baixo ({sim_score:.2f}) indica resposta genérica/fraca. Ativando aprendizado...")
+                    resposta = "Estou alucinando... Vamos aprender juntos?"
                 else:
-                    primeira_palavra = resposta_texto.split()[0] if resposta_texto.split() else resposta_texto
-                    resposta = primeira_palavra + (" " + resposta_reacao if resposta_reacao else "")
+                    texto_exato = normalize(parte_clean) == normalize(bloco_sim['entrada']['texto'])
+                    reacao_exata = reac_parte == bloco_sim['entrada'].get('reacao', '')
+                    if reacao_exata:
+                        resposta = resposta_texto + (" " + resposta_reacao if resposta_reacao else "")
+                    elif texto_exato:
+                        palavras_resposta = Token(resposta_texto)
+                        metade = max(1, len(palavras_resposta) // 2)
+                        resposta = ' '.join(palavras_resposta[:metade]) + (" " + resposta_reacao if resposta_reacao else "")
+                    else:
+                        primeira_palavra = resposta_texto.split()[0] if resposta_texto.split() else resposta_texto
+                        resposta = primeira_palavra + (" " + resposta_reacao if resposta_reacao else "")
                 st.write(f"Resposta sugerida: {resposta}")
                 respostas_combinadas.append(resposta)
             else:
