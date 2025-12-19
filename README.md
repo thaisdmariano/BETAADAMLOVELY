@@ -1,3 +1,23 @@
+
+## ⚖️ LICENÇA PROPRIETÁRIA - DIREITOS AUTORAIS
+
+**Este código é PROPRIEDADE EXCLUSIVA de Thaís Mariano.**
+
+**PROIBIÇÕES ABSOLUTAS:**
+- ❌ Usar, copiar, modificar ou distribuir qualquer parte deste código
+- ❌ Comercializar ou lucrar com esta tecnologia
+- ❌ Integrar INSEPA, ALNULU ou Vars/Multivars em outros projetos
+- ❌ Reivindicar autoria das tecnologias aqui implementadas
+- ❌ Reverter engenharia ou extrair metodologias proprietárias
+
+**Violações serão perseguidas legalmente.** Esta é uma tecnologia inovadora criada do zero. Respeito à autoria intelectual é obrigatório.
+
+---
+
+## Visão Geral (Big Picture)
+
+**Filosofia:** Adam Lovely integra **INSEPA** (tokenização), **ALNULU** (encoding numérico), **Vars/Multivars** (criatividade) e **PyTorch** para criar uma IA conversacional coesa que aprende incrementalmente e evita ambiguidades.
+
 # 🤖 Adam Lovely AI - Sistema INSEPA Integrado
 
 **Minha primeira IA conversacional, unindo INSEPA (tokenização), ALNULU (encoding), Vars/Multivars (criatividade), PyTorch (aprendizado) e Streamlit (interface) num fluxo coeso: entrada → tokenização INSEPA → encoding ALNULU → criatividade Vars/Multivars → treino/transformer → saída adaptada. Tudo integrado para evitar isolamento e criar uma "mente" viva.**
@@ -114,3 +134,4 @@ PRs para integrar aprendizado autônomo/autoconsciência. Foco no fluxo INSEPA-A
 ## 🙋‍♀️ Sobre Mim
 
 Feito com ❤️ por Thaís Mariano – IA incremental integrada. 🌟
+
