@@ -111,8 +111,6 @@ streamlit run BETADAMLOVELY.py
 ## 🤝 Contribuição
 PRs para integrar aprendizado autônomo/autoconsciência. Foco no fluxo INSEPA-ALNULU-Vars.
 
-## 📜 Licença
-MIT.
-
 ## 🙋‍♀️ Sobre Mim
+
 Feito com ❤️ por Thaís Mariano – IA incremental integrada. 🌟
