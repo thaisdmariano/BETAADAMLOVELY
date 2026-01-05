@@ -133,5 +133,6 @@ PRs para integrar aprendizado autônomo/autoconsciência. Foco no fluxo INSEPA-A
 
 ## 🙋‍♀️ Sobre Mim
 
-Feito com ❤️ por Thaís Mariano – IA incremental integrada. 🌟
+Feito com ❤️ por Thaís Mariano 
+
 
