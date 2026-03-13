@@ -1,11 +1,13 @@
-
 #!/usr/bin/env python3
-# -*- coding: utf-8 -*-
+# -*- coding: utf-8 -*-.
 
 import os
+import shutil
+import sys
 import json
 import random
 import re as _re
+import hashlib
 from typing import List, Dict, Tuple, Any, Optional
 from itertools import product
 
@@ -16,6 +18,28 @@ import torch.optim as optim
 from torch.utils.data import Dataset, DataLoader, Subset
 
 import streamlit as st
+
+# Opcional: persistência em MongoDB em vez de JSON local.
+# Configure MONGO_URI e MONGO_DB via variáveis de ambiente.
+try:
+    from pymongo import MongoClient
+    MONGO_URI = os.environ.get("MONGO_URI", "mongodb://localhost:27017")
+    MONGO_DB = os.environ.get("MONGO_DB", "adam_lovely")
+    _mongo_enabled = False
+    _mongo_error = None
+
+    # Tenta conectar ao Mongo; se falhar, desativa silenciosamente
+    try:
+        _mongo_client = MongoClient(MONGO_URI, serverSelectionTimeoutMS=2000)
+        # Força conexão para capturar erros de rede/auth
+        _mongo_client.admin.command('ping')
+        _mongo_db = _mongo_client[MONGO_DB]
+        _mongo_enabled = True
+    except Exception as e:
+        _mongo_error = str(e)
+except ImportError:
+    _mongo_enabled = False
+    _mongo_error = "pymongo não instalado"
 
 try:
     import pyttsx3
@@ -55,7 +79,8 @@ UNK = "<UNK>"
 UNK_VAL = -1.0
 N_GRAM = 8  # Tamanho do n-grama (8 para 8-grams)
 
-SENHA_ADMIN = "adam123"  # Senha para acessar Gerenciar IMs e dados completos de teste
+SENHA_ADMIN = "ADAM123"  # Senha para acesso total (Gerenciar IMs + painel completo)
+SENHA_CRIAR_BLOCOS = "TMADAM123"  # Senha para criar blocos via Cérbero (sem acesso ao painel)
 
 
 ## INSEPA_TOKENIZER
@@ -92,13 +117,69 @@ def generate_markers(start: str, count: int) -> List[str]:
 
 
 ## INSEPA_UTILS
+def _mongo_load(key: str, default: dict) -> dict:
+    """Carrega estado do MongoDB (coleção única).
+
+    O documento é salvo com _id="singleton" e todos os campos do estado são
+    armazenados no nível superior (mais prático para inspeção no MongoDB).
+    """
+    if not _mongo_enabled:
+        return default
+    col = _mongo_db[key]
+    doc = col.find_one({"_id": "singleton"})
+    if not doc:
+        doc = {"_id": "singleton"}
+        doc.update(default)
+        col.replace_one({"_id": "singleton"}, doc, upsert=True)
+        return default
+    # Remover _id antes de voltar
+    return {k: v for k, v in doc.items() if k != "_id"}
+
+
+def _mongo_save(key: str, data: dict) -> None:
+    """Salva estado no MongoDB (coleção única)."""
+    if not _mongo_enabled:
+        return
+    # Não armazenamos a payload dentro de "data" para manter o JSON tokenizado
+    if isinstance(data, dict) and "data" in data and isinstance(data["data"], dict) and len(data) == 1:
+        data = data["data"]
+
+    col = _mongo_db[key]
+    doc = {"_id": "singleton"}
+    if isinstance(data, dict):
+        doc.update(data)
+    else:
+        # Caso incomum: armazenar em campo genérico
+        doc["data"] = data
+    col.replace_one({"_id": "singleton"}, doc, upsert=True)
+
+
 def carregar_json(caminho: str, default: dict) -> dict:
+    """Carrega estado do disco (JSON) ou do Mongo (se habilitado)."""
+    def _unwrap(d: dict) -> dict:
+        # Algumas versões anteriores armazenavam a payload dentro de uma chave "data".
+        # Isso garante compatibilidade para não quebrar o formato esperado pelo app.
+        if isinstance(d, dict) and "data" in d and isinstance(d["data"], dict) and len(d) == 1:
+            return d["data"]
+        return d
+
+    if _mongo_enabled and caminho in (ARQUIVO_MEMORIA, ARQUIVO_INCONSCIENTE):
+        key = "memoria" if caminho == ARQUIVO_MEMORIA else "inconsciente"
+        data = _mongo_load(key, default)
+        data = _unwrap(data)
+        if caminho == ARQUIVO_MEMORIA:
+            st.session_state.memoria = data
+        else:
+            st.session_state.inconsciente = data
+        return data
+
     if not os.path.exists(caminho):
         with open(caminho, "w", encoding="utf-8") as f:
             json.dump(default, f, ensure_ascii=False, indent=2)
         return default
     with open(caminho, "r", encoding="utf-8") as f:
         data = json.load(f)
+    data = _unwrap(data)
     # Sempre atualizar session_state
     if caminho == ARQUIVO_MEMORIA:
         st.session_state.memoria = data
@@ -107,13 +188,74 @@ def carregar_json(caminho: str, default: dict) -> dict:
     return data
 
 
+def backup_json(caminho: str) -> None:
+    """Faz um backup do JSON antes de sobrescrever.
+
+    Os backups ficam em `backup/` com timestamp. Isso evita perda de dados
+    caso algo grave aconteça durante a gravação.
+    """
+    if not os.path.exists(caminho):
+        return
+    try:
+        os.makedirs("backup", exist_ok=True)
+        timestamp = time.strftime("%Y%m%d_%H%M%S")
+        base = os.path.basename(caminho)
+        backup_path = os.path.join("backup", f"{base}.{timestamp}.bak")
+        shutil.copy2(caminho, backup_path)
+    except Exception:
+        # Não falhar a gravação por conta do backup
+        pass
+
+
 def salvar_json(caminho: str, data: dict) -> None:
-    with open(caminho, "w", encoding="utf-8") as f:
-        json.dump(data, f, ensure_ascii=False, indent=2)
+    """Salva estado no disco (JSON) e no Mongo (se habilitado)."""
     if caminho == ARQUIVO_MEMORIA:
         st.session_state.memoria = data
     elif caminho == ARQUIVO_INCONSCIENTE:
         st.session_state.inconsciente = data
+
+    if _mongo_enabled and caminho in (ARQUIVO_MEMORIA, ARQUIVO_INCONSCIENTE):
+        key = "memoria" if caminho == ARQUIVO_MEMORIA else "inconsciente"
+        _mongo_save(key, data)
+
+    # Backup antes de sobrescrever (evitar perda acidental)
+    backup_json(caminho)
+
+    with open(caminho, "w", encoding="utf-8") as f:
+        json.dump(data, f, ensure_ascii=False, indent=2)
+
+
+def dict_hash(data: dict) -> str:
+    """Retorna hash determinístico de um dict para detectar alterações."""
+    dumped = json.dumps(data, ensure_ascii=False, sort_keys=True, separators=(',', ':'))
+    return hashlib.sha256(dumped.encode('utf-8')).hexdigest()
+
+
+def auto_save_state() -> None:
+    """Salva automaticamente memória e inconsciente em disco quando habilitado.
+
+    O Streamlit rerun é acionado em cada interação, então essa função garante que
+    os dados em `st.session_state` sejam persistidos nos JSONs em cada rerun.
+
+    Essa função evita gravações redundantes comparando hashes do estado.
+    """
+    if not st.session_state.get("auto_save", True):
+        return
+
+    memoria = st.session_state.get("memoria", {})
+    inconsciente = st.session_state.get("inconsciente", {})
+
+    # Somente salvar se houve mudança real
+    mem_hash = dict_hash(memoria)
+    inco_hash = dict_hash(inconsciente)
+
+    if st.session_state.get("_last_mem_hash") != mem_hash:
+        salvar_json(ARQUIVO_MEMORIA, memoria)
+        st.session_state["_last_mem_hash"] = mem_hash
+
+    if st.session_state.get("_last_inco_hash") != inco_hash:
+        salvar_json(ARQUIVO_INCONSCIENTE, inconsciente)
+        st.session_state["_last_inco_hash"] = inco_hash
 
 
 def garantir_pontuacao(txt: str) -> str:
@@ -752,90 +894,100 @@ class AdamSegmentado(nn.Module):
 
 ## INSEPA_TRAIN
 def train(memoria: dict, dominio: str) -> None:
-    # Atualizar inconsciente para o IM selecionado
-    atualizar_inconsciente_para_im(memoria, dominio)
+    try:
+        # Atualizar inconsciente para o IM selecionado
+        atualizar_inconsciente_para_im(memoria, dominio)
 
-    ds = InsepaFieldDataset(memoria, dominio)
-    n = len(ds)
-    ckpt = ckpt_path(dominio)
+        ds = InsepaFieldDataset(memoria, dominio)
+        n = len(ds)
+        ckpt = ckpt_path(dominio)
 
-    idxs = list(range(n))
-    random.shuffle(idxs)
-    vsz = min(max(1, int(0.2 * n)), n - 1)  # garantir pelo menos 1 para treino
-    vidx, tidx = idxs[:vsz], idxs[vsz:]
-    if not tidx:  # se tidx vazio, usar todos para treino, sem val
-        tidx = idxs
-        vidx = []
-    train_ld = DataLoader(Subset(ds, tidx), batch_size=min(BATCH_SIZE, len(tidx)), shuffle=True)
-    val_ld = DataLoader(Subset(ds, vidx), batch_size=min(BATCH_SIZE, len(vidx))) if vidx else None
+        idxs = list(range(n))
+        random.shuffle(idxs)
+        vsz = min(max(1, int(0.2 * n)), n - 1)  # garantir pelo menos 1 para treino
+        vidx, tidx = idxs[:vsz], idxs[vsz:]
+        if not tidx:  # se tidx vazio, usar todos para treino, sem val
+            tidx = idxs
+            vidx = []
+        train_ld = DataLoader(Subset(ds, tidx), batch_size=min(BATCH_SIZE, len(tidx)), shuffle=True)
+        val_ld = DataLoader(Subset(ds, vidx), batch_size=min(BATCH_SIZE, len(vidx))) if vidx else None
 
-    model = AdamSegmentado(
-        nE=len(ds.v_E), nRE=len(ds.v_RE),
-        nCE=len(ds.v_CE), nPIDE=len(ds.v_PIDE),
-        mom_size=ds.mom_size,
-        num_vals_E=len(ds.val_to_idx_E), num_vals_RE=len(ds.val_to_idx_RE),
-        num_vals_CE=len(ds.val_to_idx_CE), num_vals_PIDE=len(ds.val_to_idx_PIDE),
-        out_vocab_size=len(ds.out_vocab), max_out_len=ds.max_out_len,
-        max_E=ds.max_E, max_RE=ds.max_RE, max_CE=ds.max_CE, max_PIDE=ds.max_PIDE, max_ng=ds.max_ng
-    )
-    opt = optim.Adam(model.parameters(), lr=LR)
-    ce = nn.CrossEntropyLoss()
-    mse = nn.MSELoss()
+        model = AdamSegmentado(
+            nE=len(ds.v_E), nRE=len(ds.v_RE),
+            nCE=len(ds.v_CE), nPIDE=len(ds.v_PIDE),
+            mom_size=ds.mom_size,
+            num_vals_E=len(ds.val_to_idx_E), num_vals_RE=len(ds.val_to_idx_RE),
+            num_vals_CE=len(ds.val_to_idx_CE), num_vals_PIDE=len(ds.val_to_idx_PIDE),
+            out_vocab_size=len(ds.out_vocab), max_out_len=ds.max_out_len,
+            max_E=ds.max_E, max_RE=ds.max_RE, max_CE=ds.max_CE, max_PIDE=ds.max_PIDE, max_ng=ds.max_ng
+        )
+        opt = optim.Adam(model.parameters(), lr=LR)
+        ce = nn.CrossEntropyLoss()
+        mse = nn.MSELoss()
 
-    best, wait, prev_val = float("inf"), 0, None
-    progress_bar = st.progress(0)
-    status_text = st.empty()
-    for ep in range(1, EPOCHS + 1):
-        model.train()
-        for x, y in train_ld:
-            opt.zero_grad()
-            out = model(x, y)
-            loss = (
-                    mse(out["out"].reshape(-1), y.view(-1)) +
-                    mse(out["recon_pide"], out["pide_raw"])  # Perda não supervisionada para PIDE
-            )
-            loss.backward()
-            opt.step()
+        best, wait, prev_val = float("inf"), 0, None
+        progress_bar = st.progress(0)
+        status_text = st.empty()
+        side_bar = st.sidebar.container()
+        side_progress = side_bar.progress(0)
+        side_status = side_bar.empty()
+        for ep in range(1, EPOCHS + 1):
+            model.train()
+            for x, y in train_ld:
+                opt.zero_grad()
+                out = model(x, y)
+                loss = (
+                        mse(out["out"].reshape(-1), y.view(-1)) +
+                        mse(out["recon_pide"], out["pide_raw"])  # Perda não supervisionada para PIDE
+                )
+                loss.backward()
+                opt.step()
 
-        model.eval()
-        val_loss = 0.0
-        if val_ld:
-            with torch.no_grad():
-                for x, y in val_ld:
-                    out = model(x, y)
-                    val_loss += (
-                            mse(out["out"].reshape(-1), y.view(-1)).item() +
-                            mse(out["recon_pide"], out["pide_raw"]).item()  # Perda não supervisionada
-                    )
-            val_loss /= len(val_ld)
-        else:
-            val_loss = float("inf")  # sem validação, usar inf para não salvar
+            model.eval()
+            val_loss = 0.0
+            if val_ld:
+                with torch.no_grad():
+                    for x, y in val_ld:
+                        out = model(x, y)
+                        val_loss += (
+                                mse(out["out"].reshape(-1), y.view(-1)).item() +
+                                mse(out["recon_pide"], out["pide_raw"]).item()  # Perda não supervisionada
+                        )
+                val_loss /= len(val_ld)
+            else:
+                val_loss = float("inf")  # sem validação, usar inf para não salvar
 
-        if prev_val is None or val_loss < best:
-            best, wait = val_loss, 0
-            torch.save((
-                model.state_dict(),
-                ds.max_E, ds.max_RE, ds.max_CE, ds.max_PIDE,
-                ds.mom_size, ds.val_to_idx_E, ds.val_to_idx_RE, ds.val_to_idx_CE, ds.val_to_idx_PIDE,
-                ds.v_E, ds.v_RE, ds.v_CE, ds.v_PIDE,
-                len(ds.out_vocab), ds.max_out_len,
-                ds.max_ng,
-                ds.out_vocab, ds.all_out_markers, ds.idx_to_txt  # Adicionar vS, all_out_markers e idx_to_txt
-            ), ckpt)
-        else:
-            wait += 1
-            if wait >= PATIENCE:
-                break
-        prev_val = val_loss
-        progress_bar.progress(ep / EPOCHS)
-        status_text.text(f"Época {ep}/{EPOCHS}, Val Loss: {val_loss:.4f}")
+            if prev_val is None or val_loss < best:
+                best, wait = val_loss, 0
+                torch.save((
+                    model.state_dict(),
+                    ds.max_E, ds.max_RE, ds.max_CE, ds.max_PIDE,
+                    ds.mom_size, ds.val_to_idx_E, ds.val_to_idx_RE, ds.val_to_idx_CE, ds.val_to_idx_PIDE,
+                    ds.v_E, ds.v_RE, ds.v_CE, ds.v_PIDE,
+                    len(ds.out_vocab), ds.max_out_len,
+                    ds.max_ng,
+                    ds.out_vocab, ds.all_out_markers, ds.idx_to_txt  # Adicionar vS, all_out_markers e idx_to_txt
+                ), ckpt)
+            else:
+                wait += 1
+                if wait >= PATIENCE:
+                    break
+            prev_val = val_loss
+            progress_bar.progress(ep / EPOCHS)
+            side_progress.progress(ep / EPOCHS)
+            status_msg = f"Época {ep}/{EPOCHS}, Val Loss: {val_loss:.4f}"
+            status_text.text(status_msg)
+            side_status.text(status_msg)
 
-    st.success(f"✅ Treino concluído. best_val_loss={best:.4f}")
-    
-    # Salvar backup do JSON usado para treinamento
-    backup_memoria = f"backup/Adam_Lovely_memory_backup_{dominio}_{int(time.time())}.json"
-    salvar_json(backup_memoria, memoria)
-    st.info(f"📁 Backup do JSON salvo como: {backup_memoria}")
+        st.success(f"✅ Treino concluído. best_val_loss={best:.4f}")
+        
+        # Salvar backup do JSON usado para treinamento
+        backup_memoria = f"backup/Adam_Lovely_memory_backup_{dominio}_{int(time.time())}.json"
+        salvar_json(backup_memoria, memoria)
+        st.info(f"📁 Backup do JSON salvo como: {backup_memoria}")
+    except Exception as e:
+        st.error(f"❌ Treino falhou: {e}")
+        st.exception(e)
 
 
 def fine_tune_model(memoria: dict, dominio: str, new_data: List[Tuple[Dict, Dict]]) -> None:
@@ -939,10 +1091,12 @@ def fine_tune_model(memoria: dict, dominio: str, new_data: List[Tuple[Dict, Dict
 
 
 def generate_insight(bloco, chosen=None):
-    if bloco["entrada"]["texto"] and bloco["entrada"].get("reacao") and bloco["saidas"][0].get("contexto"):
+    # Usar o contexto de ENTRADA (CE) para explicar a seleção de resposta.
+    if bloco["entrada"].get("texto") and bloco["entrada"].get("reacao"):
         ep_txt = bloco["entrada"]["texto"]
         ep_reac = bloco["entrada"]["reacao"]
-        contexto = bloco["saidas"][0]["contexto"]
+        # Usar exclusivamente o contexto de entrada (CE); o contexto de saída (CS) não deve ser usado aqui.
+        contexto = bloco["entrada"].get("contexto", "")
         if chosen is None:
             chosen = bloco["saidas"][0]["textos"][0]
         emoji = bloco["saidas"][0].get("reacao", "")
@@ -955,9 +1109,9 @@ def gerar_reflexao(conversa_blocos: List[dict], dominio: str) -> str:
     if len(conversa_blocos) < 2:
         return None
     
-    # Analisar padrões: emoções, contextos
+    # Analisar padrões: emoções, contextos (usar contexto de entrada - CE)
     emocoes = [b["entrada"].get("reacao", "") for b in conversa_blocos]
-    contextos = [b["saidas"][0].get("contexto", "") for b in conversa_blocos]
+    contextos = [b["entrada"].get("contexto", "") for b in conversa_blocos]
     
     emocao_comum = max(set(emocoes), key=emocoes.count) if emocoes else ""
     contexto_comum = max(set(contextos), key=contextos.count) if contextos else ""
@@ -1390,7 +1544,8 @@ def infer(memoria: dict, dominio: str) -> None:
             bloco = st.session_state.current_bloco
             ep_txt = bloco["entrada"]["texto"]
             ep_reac = bloco["entrada"].get("reacao", "")
-            contexto = bloco["saidas"][0].get("contexto", "")
+            # Usar o contexto da intenção (entrada), não o contexto da resposta
+            contexto = bloco["entrada"].get("contexto", "")
             emoji = bloco["saidas"][0].get("reacao", "")
             texts = bloco["saidas"][0]["textos"]
             chosen = texts[st.session_state.variation]
@@ -1572,14 +1727,33 @@ def infer(memoria: dict, dominio: str) -> None:
         if bloco is None:
             if "cerbero_step" not in st.session_state:
                 txt, reac = parse_text_reaction(s)
-                st.session_state.cerbero_step = "collect_text_confirmation"
+                st.session_state.cerbero_step = "verify_credentials"
                 st.session_state.new_input = txt
                 st.session_state.new_reac = reac
-                ai_msg = f'🔍 Não tenho conhecimento sobre isso. Pode por favor confirmar? "{txt}" é um texto correto?'
+                ai_msg = f'🔍 Não tenho conhecimento sobre isso. Mas estou sempre disposto a aprender. Por favor confirme suas credenciais:'
                 st.session_state.messages.append({"role": "assistant", "content": ai_msg})
                 with st.chat_message("assistant"):
                     st.markdown(ai_msg)
                 st.rerun()
+            elif st.session_state.cerbero_step == "verify_credentials":
+                credential = prompt.strip()
+                if credential == SENHA_CRIAR_BLOCOS:
+                    st.session_state.cerbero_step = "collect_text_confirmation"
+                    ai_msg = f'Fantástico! Olá TM. Pode por favor confirmar? "{st.session_state.new_input}" é um texto correto?'
+                    st.session_state.messages.append({"role": "assistant", "content": ai_msg})
+                    with st.chat_message("assistant"):
+                        st.markdown(ai_msg)
+                    st.rerun()
+                else:
+                    ai_msg = f'Desculpe. Seu acesso não é permitido por questões de segurança. Sinta-se a vontade para entrar em outros universos, ou aguarde por nossas atualizações. Até mais!'
+                    st.session_state.messages.append({"role": "assistant", "content": ai_msg})
+                    with st.chat_message("assistant"):
+                        st.markdown(ai_msg)
+                    # Reset para recusar o aprendizado
+                    for key in ["cerbero_step", "new_input", "new_reac"]:
+                        if key in st.session_state:
+                            del st.session_state[key]
+                    st.rerun()
             elif st.session_state.cerbero_step == "collect_text_confirmation":
                 confirmation = parse_quoted_response(prompt).lower().strip()
                 if confirmation in ["sim", "s", "yes", "y", "correto", "certo", "ok"]:
@@ -4211,10 +4385,27 @@ def main():
     
     st.title("🤖 Adam Lovely AI - Sistema INSEPA")
     st.markdown("### Interface de Chat com IA Avançada")
+    try:
+        import torch
+        torch_ver = torch.__version__
+    except Exception:
+        torch_ver = "não instalado"
+    st.caption(f"Python em uso: {sys.executable} | Python {sys.version.split()[0]} | PyTorch {torch_ver}")
+
+    # Informações de persistência (JSON local e opcionalmente MongoDB)
+    if _mongo_enabled:
+        st.success(f"✅ MongoDB ativado (DB: {MONGO_DB})")
+    else:
+        st.info("🔒 MongoDB não ativado. Use MONGO_URI+MONGO_DB para habilitar.")
+        if _mongo_error:
+            st.warning(f"(erro Mongo: {_mongo_error})")
+
     # Inicializar dados em session_state para persistência na nuvem
     # Sempre recarregar dados do arquivo para garantir sincronização
     st.session_state.memoria = carregar_json(ARQUIVO_MEMORIA, {"IM": {}})
     st.session_state.inconsciente = carregar_json(ARQUIVO_INCONSCIENTE, {"INCO": {}})
+    # Salva imediatamente ao entrar no site (garante persistência mesmo sem interação).
+    auto_save_state()
     if "likes" not in st.session_state:
         st.session_state.likes = {}  # {bloco_id: {variacao: count}}
     memoria = st.session_state.memoria
@@ -4223,23 +4414,25 @@ def main():
     # Menu no canto esquerdo
     with st.sidebar:
         st.header("Menu")
-        if st.button("🏗️ Gerenciar IMs"):
-            st.session_state.menu = "gerenciar"
-        if st.button("🧠 Treinar"):
-            st.session_state.menu = "treinar"
-        if st.button("🧪 Testar"):
-            st.session_state.menu = "testar"
-        if st.button("🧪 Testar Adam Afiado"):
-            st.session_state.menu = "testar_adam"
+
+        is_admin = st.session_state.get("admin", False)
+
+        # Acesso público: apenas conversar e estatísticas
         if st.button("💬 Conversar"):
             st.session_state.menu = "conversar"
         if st.button("📊 Estatísticas"):
             st.session_state.menu = "estatisticas"
-        if st.button("🚀 Evoluir IA"):
-            st.session_state.menu = "evoluir"
         if st.button("❌ Sair"):
             st.write("👋 Até mais!")
             st.stop()
+
+        # Auto-save opcional: grava JSONs sempre que a interface é atualizada.
+        st.checkbox("💾 Auto-save (gravar JSON automaticamente)", value=st.session_state.get("auto_save", True), key="auto_save")
+
+        # Acesso administrativo: tudo concentrado em Gerenciar IMs
+        if is_admin:
+            if st.button("🏗️ Gerenciar IMs (admin)"):
+                st.session_state.menu = "gerenciar"
 
         # Modo Administrador
         with st.expander("🔐 Modo Administrador"):
@@ -4251,7 +4444,85 @@ def main():
                 else:
                     st.error("❌ Senha incorreta.")
 
+            if st.session_state.get("admin", False):
+                st.warning("⚠️ Reset limpa toda a sessão (histórico, mensagens, estados)")
+                confirmar_reset = st.checkbox("Confirmo que desejo limpar a sessão", key="confirm_reset")
+                if st.button("🧹 Resetar interface (limpar sessão)"):
+                    if confirmar_reset:
+                        st.session_state.clear()
+                        try:
+                            st.cache_data.clear()
+                        except Exception:
+                            pass
+                        try:
+                            st.cache_resource.clear()
+                        except Exception:
+                            pass
+                        st.rerun()
+                    else:
+                        st.error("Marque a confirmação antes de resetar.")
+
+                with st.expander("🧨 Hard reset (apagar dados e checkpoints)"):
+                    st.error("Apaga memória, inconsciente, checkpoints e backups. Irreversível.")
+                    confirmar_hard = st.checkbox("Confirmo que desejo apagar TODOS os dados", key="confirm_hard_reset")
+                    confirmar_texto = st.text_input("Digite APAGAR para confirmar", key="confirm_hard_reset_text")
+                    if st.button("🔥 Apagar tudo (hard reset)"):
+                        if confirmar_hard and confirmar_texto.strip().upper() == "APAGAR":
+                            erros = []
+                            for alvo in [ARQUIVO_MEMORIA, ARQUIVO_INCONSCIENTE]:
+                                if os.path.exists(alvo):
+                                    try:
+                                        os.remove(alvo)
+                                    except Exception as e:
+                                        erros.append(f"Falha ao remover {alvo}: {e}")
+                            # Remover checkpoints insepa_*.pt
+                            try:
+                                for f in os.listdir('.'):
+                                    if f.startswith('insepa_') and f.endswith('.pt') and os.path.isfile(f):
+                                        try:
+                                            os.remove(f)
+                                        except Exception as e:
+                                            erros.append(f"Falha ao remover {f}: {e}")
+                            except Exception as e:
+                                erros.append(f"Falha ao listar checkpoints: {e}")
+                            # Remover backups
+                            if os.path.exists('backup'):
+                                try:
+                                    shutil.rmtree('backup', ignore_errors=True)
+                                except Exception as e:
+                                    erros.append(f"Falha ao remover backup/: {e}")
+
+                            # Remover config/cache do Streamlit no perfil do usuário
+                            streamlit_home = os.path.join(os.path.expanduser('~'), '.streamlit')
+                            if os.path.exists(streamlit_home):
+                                try:
+                                    shutil.rmtree(streamlit_home, ignore_errors=True)
+                                except Exception as e:
+                                    erros.append(f"Falha ao remover {streamlit_home}: {e}")
+
+                            st.session_state.clear()
+                            try:
+                                st.cache_data.clear()
+                            except Exception:
+                                pass
+                            try:
+                                st.cache_resource.clear()
+                            except Exception:
+                                pass
+
+                            if erros:
+                                st.warning("Hard reset concluído com avisos:\n" + "\n".join(erros))
+                            else:
+                                st.success("Hard reset concluído. Dados, checkpoints e backups removidos.")
+                            st.rerun()
+                        else:
+                            st.error("Marque a confirmação e digite APAGAR para prosseguir.")
+
     if "menu" not in st.session_state:
+        st.session_state.menu = "conversar"
+
+    # Garantir que usuários não-admin fiquem apenas em conversar/estatísticas
+    if not st.session_state.get("admin", False) and st.session_state.menu not in ("conversar", "estatisticas"):
         st.session_state.menu = "conversar"
 
     if st.session_state.menu == "gerenciar":
@@ -4259,20 +4530,23 @@ def main():
             st.error("❌ Acesso negado. Use 'Modo Administrador' no menu lateral para acessar o Gerenciador de IMs.")
             return
         submenu_im(memoria, inconsciente)
-    elif st.session_state.menu == "treinar":
-        dom = prompt_dominio("treinar", memoria)
-        if dom:
-            if dom in memoria["IM"]:
-                train(memoria, dom)
-            else:
-                st.error(f"❌ Domínio '{dom}' não encontrado.")
-    elif st.session_state.menu == "testar":
-        dom = prompt_dominio("testar", memoria)
-        if dom:
-            if dom in memoria["IM"]:
-                test_model(memoria, dom)
-            else:
-                st.error(f"❌ Domínio '{dom}' não encontrado.")
+
+        # Ações avançadas concentradas aqui para admins
+        with st.expander("⚙️ Treino, Testes e Evolução (admin)"):
+            acao = st.selectbox("Escolha a ação:", ["Treinar", "Testar", "Testar Adam Afiado", "Evoluir IA"], key="admin_acao")
+            dom = prompt_dominio(acao.lower(), memoria)
+            if dom and st.button(f"Executar {acao}", key="btn_admin_acao"):
+                if dom not in memoria.get("IM", {}):
+                    st.error(f"❌ Domínio '{dom}' não encontrado.")
+                else:
+                    if acao == "Treinar":
+                        train(memoria, dom)
+                    elif acao == "Testar":
+                        test_model(memoria, dom)
+                    elif acao == "Testar Adam Afiado":
+                        submenu_testar_adam(memoria, inconsciente)
+                    elif acao == "Evoluir IA":
+                        submenu_testar_adam(memoria, inconsciente)
     elif st.session_state.menu == "conversar":
         st.write("Áudio disponível. Ouça a voz do personagem escolhido agora!")
         dom = prompt_dominio("conversar", memoria)
@@ -4283,8 +4557,9 @@ def main():
                 st.error(f"❌ Domínio '{dom}' não encontrado.")
     elif st.session_state.menu == "estatisticas":
         submenu_estatisticas(memoria)
-    elif st.session_state.menu == "testar_adam":
-        submenu_testar_adam(memoria, inconsciente)
+
+    # Auto-save (se habilitado) em cada rerun (inclui entrada no site)
+    auto_save_state()
 
 
 if __name__ == "__main__":
