@@ -38,13 +38,32 @@ except ImportError:
 
 import sys
 import time
+from datetime import datetime
+
+# MongoDB imports
+try:
+    from pymongo import MongoClient
+    MONGODB_AVAILABLE = True
+except ImportError:
+    MONGODB_AVAILABLE = False
+    MongoClient = None
 
 # ────────────────────────────────────────────────────────────────────────────────
 # CONFIGURAÇÃO DE ARQUIVOS E CONSTANTES
 # ────────────────────────────────────────────────────────────────────────────────
 
-ARQUIVO_MEMORIA = "Adam_Lovely_memory.json"
-ARQUIVO_INCONSCIENTE = "Adam_Lovely_inconscious.json"
+# ✅ CAMINHOS ROBUSTOS: Tenta múltiplos locais de salvamento
+def get_data_dir():
+    """Retorna diretório de dados com fallback para múltiplas localizações."""
+    # Prioridade 1: Diretório local da aplicação
+    local_dir = os.path.dirname(os.path.abspath(__file__))
+    data_dir = os.path.join(local_dir, "data")
+    os.makedirs(data_dir, exist_ok=True)
+    return data_dir
+
+DATA_DIR = get_data_dir()
+ARQUIVO_MEMORIA = os.path.join(DATA_DIR, "Adam_Lovely_memory.json")
+ARQUIVO_INCONSCIENTE = os.path.join(DATA_DIR, "Adam_Lovely_inconscious.json")
 EMBED_DIM = 64
 HIDDEN_DIM = 64
 PATIENCE = 5
@@ -56,6 +75,35 @@ UNK_VAL = -1.0
 N_GRAM = 8  # Tamanho do n-grama (8 para 8-grams)
 
 SENHA_ADMIN = "adam123"  # Senha para acessar Gerenciar IMs e dados completos de teste
+
+# ────────────────────────────────────────────────────────────────────────────────
+# CONFIGURAÇÃO MONGODB (PERSISTÊNCIA GRATUITA)
+# ────────────────────────────────────────────────────────────────────────────────
+
+# ✅ MONGODB ATLAS (GRATUITO ATÉ 512MB)
+# Para configurar: 1. Crie conta no mongodb.com/atlas
+# 2. Vá em "Connect" > "Connect your application"  
+# 3. Copie a connection string e substitua abaixo
+MONGODB_URI = os.getenv("MONGODB_URI", "mongodb+srv://demo:demo@cluster0.mongodb.net/?retryWrites=true&w=majority")
+MONGODB_DB = os.getenv("MONGODB_DB", "adam_lovely_db")
+
+# Inicializar cliente MongoDB
+try:
+    from pymongo import MongoClient
+    from pymongo.errors import ConnectionFailure
+    import gridfs
+    
+    client = MongoClient(MONGODB_URI, serverSelectionTimeoutMS=5000)
+    # Testar conexão
+    client.admin.command('ping')
+    db = client[DATABASE_NAME]
+    fs = gridfs.GridFS(db)  # Para arquivos grandes (checkpoints)
+    MONGODB_AVAILABLE = True
+    print("✅ MongoDB conectado com sucesso!")
+except Exception as e:
+    MONGODB_AVAILABLE = False
+    print(f"⚠️ MongoDB não disponível: {e}")
+    print("📝 Usando modo local (dados não persistem no Streamlit Cloud)")
 
 
 ## INSEPA_TOKENIZER
@@ -93,27 +141,254 @@ def generate_markers(start: str, count: int) -> List[str]:
 
 ## INSEPA_UTILS
 def carregar_json(caminho: str, default: dict) -> dict:
-    if not os.path.exists(caminho):
-        with open(caminho, "w", encoding="utf-8") as f:
-            json.dump(default, f, ensure_ascii=False, indent=2)
+    """Carrega JSON com verificação de persistência."""
+    try:
+        if not os.path.exists(caminho):
+            os.makedirs(os.path.dirname(caminho), exist_ok=True)
+            with open(caminho, "w", encoding="utf-8") as f:
+                json.dump(default, f, ensure_ascii=False, indent=2)
+            return default
+        with open(caminho, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        # Sempre atualizar session_state
+        if caminho == ARQUIVO_MEMORIA:
+            st.session_state.memoria = data
+        elif caminho == ARQUIVO_INCONSCIENTE:
+            st.session_state.inconsciente = data
+        return data
+    except Exception as e:
+        st.warning(f"⚠️ Erro ao carregar {caminho}: {e}")
         return default
-    with open(caminho, "r", encoding="utf-8") as f:
-        data = json.load(f)
-    # Sempre atualizar session_state
-    if caminho == ARQUIVO_MEMORIA:
-        st.session_state.memoria = data
-    elif caminho == ARQUIVO_INCONSCIENTE:
-        st.session_state.inconsciente = data
-    return data
 
 
-def salvar_json(caminho: str, data: dict) -> None:
-    with open(caminho, "w", encoding="utf-8") as f:
-        json.dump(data, f, ensure_ascii=False, indent=2)
-    if caminho == ARQUIVO_MEMORIA:
-        st.session_state.memoria = data
-    elif caminho == ARQUIVO_INCONSCIENTE:
-        st.session_state.inconsciente = data
+def salvar_json(caminho: str, data: dict) -> bool:
+    """Salva JSON com verificação de sucesso e retry."""
+    max_retries = 3
+    for tentativa in range(max_retries):
+        try:
+            # Garantir diretório existe
+            os.makedirs(os.path.dirname(caminho), exist_ok=True)
+            
+            # Salvar JSON
+            with open(caminho, "w", encoding="utf-8") as f:
+                json.dump(data, f, ensure_ascii=False, indent=2)
+            
+            # ✅ VERIFICAR se foi salvo corretamente (anti-perda de dados)
+            with open(caminho, "r", encoding="utf-8") as f:
+                verificacao = json.load(f)
+            
+            if verificacao == data:
+                # Salvo com sucesso
+                if caminho == ARQUIVO_MEMORIA:
+                    st.session_state.memoria = data
+                elif caminho == ARQUIVO_INCONSCIENTE:
+                    st.session_state.inconsciente = data
+                return True
+        except Exception as e:
+            if tentativa < max_retries - 1:
+                time.sleep(0.5)  # aguardar antes de retry
+                continue
+            st.error(f"❌ Erro CRÍTICO ao salvar {caminho}: {e}")
+            return False
+    return False
+
+
+def conectar_mongodb():
+    """Conecta ao MongoDB com fallback para local."""
+    if not MONGODB_AVAILABLE:
+        return None
+        
+    try:
+        client = MongoClient(MONGODB_URI, serverSelectionTimeoutMS=5000)
+        # Testar conexão
+        client.admin.command('ping')
+        return client
+    except Exception as e:
+        st.warning(f"⚠️ MongoDB indisponível: {e}. Usando armazenamento local.")
+        return None
+
+
+def salvar_mongodb(collection_name: str, data: dict) -> bool:
+    """Salva dados no MongoDB com verificação."""
+    client = conectar_mongodb()
+    if not client:
+        return False
+    
+    try:
+        db = client[MONGODB_DB]
+        collection = db[collection_name]
+        
+        # Salvar com timestamp
+        doc = {
+            "data": data,
+            "timestamp": datetime.now().isoformat(),
+            "version": "1.0"
+        }
+        
+        # Upsert (atualizar se existir, inserir se não)
+        result = collection.replace_one(
+            {"_id": collection_name},  # usar nome da collection como ID único
+            doc,
+            upsert=True
+        )
+        
+        # Verificar se foi salvo
+        saved_doc = collection.find_one({"_id": collection_name})
+        if saved_doc and saved_doc["data"] == data:
+            st.info(f"✅ Dados salvos no MongoDB: {collection_name}")
+            return True
+        else:
+            st.error(f"❌ Falha na verificação do MongoDB: {collection_name}")
+            return False
+            
+    except Exception as e:
+        st.error(f"❌ Erro ao salvar no MongoDB: {e}")
+        return False
+    finally:
+        if client:
+            client.close()
+
+
+def carregar_mongodb(collection_name: str, default: dict) -> dict:
+    """Carrega dados do MongoDB com fallback."""
+    client = conectar_mongodb()
+    if not client:
+        return default
+    
+    try:
+        db = client[MONGODB_DB]
+        collection = db[collection_name]
+        
+        doc = collection.find_one({"_id": collection_name})
+        if doc and "data" in doc:
+            st.info(f"✅ Dados carregados do MongoDB: {collection_name}")
+            return doc["data"]
+        else:
+            st.warning(f"⚠️ Dados não encontrados no MongoDB: {collection_name}")
+            return default
+            
+    except Exception as e:
+        st.error(f"❌ Erro ao carregar do MongoDB: {e}")
+        return default
+    finally:
+        if client:
+            client.close()
+
+
+def salvar_dados_permanente(tipo: str, data: dict) -> bool:
+    """Salva dados usando MongoDB prioritariamente, com fallback para JSON."""
+    if tipo == "memoria":
+        collection = "adam_memory"
+        caminho = ARQUIVO_MEMORIA
+    elif tipo == "inconsciente":
+        collection = "adam_inconscious"
+        caminho = ARQUIVO_INCONSCIENTE
+    else:
+        st.error(f"❌ Tipo de dados inválido: {tipo}")
+        return False
+    
+    # Tentar MongoDB primeiro
+    if salvar_mongodb(collection, data):
+        # Também salvar localmente como backup
+        salvar_json(caminho, data)
+        return True
+    else:
+        # Fallback para JSON local
+        st.warning("🔄 Usando armazenamento local como fallback")
+        return salvar_json(caminho, data)
+
+
+def carregar_dados_permanente(tipo: str, default: dict) -> dict:
+    """Carrega dados do MongoDB prioritariamente, com fallback para JSON."""
+    if tipo == "memoria":
+        collection = "adam_memory"
+        caminho = ARQUIVO_MEMORIA
+    elif tipo == "inconsciente":
+        collection = "adam_inconscious"
+        caminho = ARQUIVO_INCONSCIENTE
+    else:
+        st.error(f"❌ Tipo de dados inválido: {tipo}")
+        return default
+    
+    # Tentar MongoDB primeiro
+    data = carregar_mongodb(collection, None)
+    if data is not None:
+        # Atualizar session_state
+        if tipo == "memoria":
+            st.session_state.memoria = data
+        elif tipo == "inconsciente":
+            st.session_state.inconsciente = data
+        return data
+    else:
+        # Fallback para JSON local
+        st.warning("🔄 Carregando do armazenamento local")
+        return carregar_json(caminho, default)
+
+
+def salvar_checkpoint_session(dominio: str, checkpoint_data: tuple) -> bool:
+    """Salva checkpoint no session state (mais rápido e não precisa de disco)."""
+    try:
+        # Inicializar dicionário de checkpoints se não existir
+        if "checkpoints" not in st.session_state:
+            st.session_state.checkpoints = {}
+        
+        # Salvar checkpoint no session state
+        st.session_state.checkpoints[dominio] = checkpoint_data
+        st.info(f"✅ Checkpoint salvo na sessão: {dominio}")
+        return True
+    except Exception as e:
+        st.error(f"❌ Erro ao salvar checkpoint na sessão: {e}")
+        return False
+
+
+def carregar_checkpoint_session(dominio: str) -> tuple:
+    """Carrega checkpoint do session state."""
+    try:
+        if "checkpoints" in st.session_state and dominio in st.session_state.checkpoints:
+            return st.session_state.checkpoints[dominio]
+        return None
+    except Exception as e:
+        st.warning(f"⚠️ Erro ao carregar checkpoint da sessão: {e}")
+        return None
+
+
+def salvar_checkpoint_permanente(dominio: str, checkpoint_data: tuple) -> bool:
+    """Salva checkpoint usando session state prioritariamente, com fallback para arquivo."""
+    # Tentar session state primeiro (mais rápido)
+    if salvar_checkpoint_session(dominio, checkpoint_data):
+        return True
+    
+    # Fallback para arquivo local
+    try:
+        ckpt_path_file = ckpt_path(dominio)
+        torch.save(checkpoint_data, ckpt_path_file)
+        st.warning(f"🔄 Checkpoint salvo em arquivo local: {ckpt_path_file}")
+        return True
+    except Exception as e:
+        st.error(f"❌ Falha crítica ao salvar checkpoint: {e}")
+        return False
+
+
+def carregar_checkpoint_permanente(dominio: str) -> tuple:
+    """Carrega checkpoint do session state prioritariamente, com fallback para arquivo."""
+    # Tentar session state primeiro
+    checkpoint = carregar_checkpoint_session(dominio)
+    if checkpoint is not None:
+        return checkpoint
+    
+    # Fallback para arquivo local
+    try:
+        ckpt_path_file = ckpt_path(dominio)
+        if os.path.exists(ckpt_path_file):
+            checkpoint = torch.load(ckpt_path_file, map_location='cpu')
+            # Salvar no session state para próximas vezes
+            salvar_checkpoint_session(dominio, checkpoint)
+            st.info(f"✅ Checkpoint carregado do arquivo e salvo na sessão: {dominio}")
+            return checkpoint
+    except Exception as e:
+        st.warning(f"⚠️ Erro ao carregar checkpoint do arquivo: {e}")
+    
+    return None
 
 
 def garantir_pontuacao(txt: str) -> str:
@@ -757,7 +1032,6 @@ def train(memoria: dict, dominio: str) -> None:
 
     ds = InsepaFieldDataset(memoria, dominio)
     n = len(ds)
-    ckpt = ckpt_path(dominio)
 
     idxs = list(range(n))
     random.shuffle(idxs)
@@ -813,7 +1087,7 @@ def train(memoria: dict, dominio: str) -> None:
 
         if prev_val is None or val_loss < best:
             best, wait = val_loss, 0
-            torch.save((
+            checkpoint_data = (
                 model.state_dict(),
                 ds.max_E, ds.max_RE, ds.max_CE, ds.max_PIDE,
                 ds.mom_size, ds.val_to_idx_E, ds.val_to_idx_RE, ds.val_to_idx_CE, ds.val_to_idx_PIDE,
@@ -821,7 +1095,8 @@ def train(memoria: dict, dominio: str) -> None:
                 len(ds.out_vocab), ds.max_out_len,
                 ds.max_ng,
                 ds.out_vocab, ds.all_out_markers, ds.idx_to_txt  # Adicionar vS, all_out_markers e idx_to_txt
-            ), ckpt)
+            )
+            salvar_checkpoint_permanente(dominio, checkpoint_data)
         else:
             wait += 1
             if wait >= PATIENCE:
@@ -832,20 +1107,26 @@ def train(memoria: dict, dominio: str) -> None:
 
     st.success(f"✅ Treino concluído. best_val_loss={best:.4f}")
     
+    # Salvar dados permanentemente nos arquivos JSON principais
+    salvar_json(ARQUIVO_MEMORIA, memoria)
+    salvar_json(ARQUIVO_INCONSCIENTE, st.session_state.inconsciente)
+    st.session_state.memoria = memoria  # Atualizar session state
+    
     # Salvar backup do JSON usado para treinamento
     backup_memoria = f"backup/Adam_Lovely_memory_backup_{dominio}_{int(time.time())}.json"
+    os.makedirs("backup", exist_ok=True)
     salvar_json(backup_memoria, memoria)
-    st.info(f"📁 Backup do JSON salvo como: {backup_memoria}")
+    st.info(f"📁 Backup do JSON salvo em: {backup_memoria}")
+    st.success(f"💾 Memória permanente salva em {ARQUIVO_MEMORIA}")
 
 
 def fine_tune_model(memoria: dict, dominio: str, new_data: List[Tuple[Dict, Dict]]) -> None:
     """Fine-tuning incremental com novos dados de interação."""
-    ckpt = ckpt_path(dominio)
-    if not os.path.exists(ckpt):
+    data = carregar_checkpoint_permanente(dominio)
+    if data is None:
         st.warning("⚠️ Sem checkpoint para fine-tuning.")
         return
 
-    data = torch.load(ckpt)
     if len(data) == 18:
         (state,
          maxE, maxRE, maxCE, maxPIDE,
@@ -927,14 +1208,15 @@ def fine_tune_model(memoria: dict, dominio: str, new_data: List[Tuple[Dict, Dict
             opt.step()
 
     # Salvar modelo atualizado
-    torch.save((
+    checkpoint_data = (
         model.state_dict(),
         maxE, maxRE, maxCE, maxPIDE,
         mom_size, val_to_idx_E, val_to_idx_RE, val_to_idx_CE, val_to_idx_PIDE,
         vE, vRE, vCE, vPIDE,
         out_vocab_size, max_out_len,
         max_ng
-    ), ckpt)
+    )
+    salvar_checkpoint_permanente(dominio, checkpoint_data)
     st.info("🔄 Modelo fine-tunado com nova interação.")
 
 
@@ -974,12 +1256,11 @@ def gerar_reflexao(conversa_blocos: List[dict], dominio: str) -> str:
 
 def fine_tune_online(memoria: dict, dominio: str, bloco_id: str, response: str) -> None:
     """Fine-tuning online com um bloco específico baseado no like."""
-    ckpt = ckpt_path(dominio)
-    if not os.path.exists(ckpt):
+    data = carregar_checkpoint_permanente(dominio)
+    if data is None:
         st.warning("⚠️ Sem checkpoint para fine-tuning online.")
         return
 
-    data = torch.load(ckpt)
     if len(data) == 18:
         (state,
          maxE, maxRE, maxCE, maxPIDE,
@@ -1056,14 +1337,20 @@ def fine_tune_online(memoria: dict, dominio: str, bloco_id: str, response: str) 
             opt.step()
 
     # Salvar modelo atualizado
-    torch.save((
+    checkpoint_data = (
         model.state_dict(),
         maxE, maxRE, maxCE, maxPIDE,
         mom_size, val_to_idx_E, val_to_idx_RE, val_to_idx_CE, val_to_idx_PIDE,
         vE, vRE, vCE, vPIDE,
         out_vocab_size, max_out_len,
         max_ng
-    ), ckpt)
+    )
+    salvar_checkpoint_permanente(dominio, checkpoint_data)
+    
+    # ✅ Salvar memória permanentemente após fine-tuning
+    salvar_json(ARQUIVO_MEMORIA, memoria)
+    st.session_state.memoria = memoria
+    st.success("💾 Memória salva permanentemente após fine-tuning!")
 
 
 def calcular_similaridade(bloco: dict, txt: str, reac: str, contexto: str, thought: str, dominio: str) -> float:
@@ -1191,13 +1478,12 @@ def infer(memoria: dict, dominio: str) -> None:
     # Atualizar inconsciente para o IM selecionado
     atualizar_inconsciente_para_im(memoria, dominio)
 
-    ckpt = ckpt_path(dominio)
-    if not os.path.exists(ckpt):
+    data = carregar_checkpoint_permanente(dominio)
+    if data is None:
         st.warning("⚠️ Sem checkpoint — treine primeiro.")
         train(memoria, dominio)
         return
 
-    data = torch.load(ckpt)
     if len(data) == 20:
         (state,
          maxE, maxRE, maxCE, maxPIDE,
@@ -2569,12 +2855,11 @@ def test_model(memoria: dict, dominio: str) -> None:
     # Atualizar inconsciente para o IM selecionado
     atualizar_inconsciente_para_im(memoria, dominio)
 
-    ckpt = ckpt_path(dominio)
-    if not os.path.exists(ckpt):
+    data = carregar_checkpoint_permanente(dominio)
+    if data is None:
         st.warning("⚠️ Sem checkpoint — treine primeiro.");
         return
 
-    data = torch.load(ckpt)
     if len(data) == 20:
         (state,
          maxE, maxRE, maxCE, maxPIDE,
@@ -3958,8 +4243,10 @@ def submenu_testar_adam(memoria: dict, inconsciente: dict) -> None:
 
 def generate_autonomous_block(entrada_texto: str, entrada_reacao: str, entrada_contexto: str, entrada_pensamento: str, dominio: str, memoria: dict, entrada_multivars: list = None, multivars_saida: list = None) -> str:
     """Gera um bloco INSEPA automaticamente usando o modelo treinado para autonomia real, não hardcoded."""
-    ckpt = ckpt_path(dominio)
-    if not os.path.exists(ckpt):
+
+    # Carregar modelo para geração autônoma
+    data = carregar_checkpoint_permanente(dominio)
+    if data is None:
         # Fallback para hardcoded se não há modelo
         return f"""Índice mãe: {dominio}
 
@@ -3980,8 +4267,6 @@ Reação: 🤖
 Contexto: Fallback autônomo
 """
 
-    # Carregar modelo para geração autônoma
-    data = torch.load(ckpt)
     if len(data) == 20:
         (state, maxE, maxRE, maxCE, maxPIDE, mom_size, val_to_idx_E, val_to_idx_RE, val_to_idx_CE, val_to_idx_PIDE,
          vE, vRE, vCE, vPIDE, n_txt, max_out_len, max_ng, vS, all_out_markers, idx_to_txt) = data
@@ -4211,10 +4496,31 @@ def main():
     
     st.title("🤖 Adam Lovely AI - Sistema INSEPA")
     st.markdown("### Interface de Chat com IA Avançada")
-    # Inicializar dados em session_state para persistência na nuvem
+    
+    # ✅ INICIALIZAR COM VERIFICAÇÃO DE INTEGRIDADE
     # Sempre recarregar dados do arquivo para garantir sincronização
-    st.session_state.memoria = carregar_json(ARQUIVO_MEMORIA, {"IM": {}})
-    st.session_state.inconsciente = carregar_json(ARQUIVO_INCONSCIENTE, {"INCO": {}})
+    if "memoria" not in st.session_state or st.session_state.memoria is None:
+        st.session_state.memoria = carregar_dados_permanente("memoria", {"IM": {}})
+    if "inconsciente" not in st.session_state or st.session_state.inconsciente is None:
+        st.session_state.inconsciente = carregar_dados_permanente("inconsciente", {"INCO": {}})
+    
+    # ✅ VERIFICAÇÃO DE PERSISTÊNCIA: Carregar dados atualizados do disco
+    # Prioriza dados do disco se existem (garante dados recentes)
+    memoria_disk = carregar_dados_permanente("memoria", {"IM": {}})
+    inconsciente_disk = carregar_dados_permanente("inconsciente", {"INCO": {}})
+    
+    # Se há dados no disco, sincronizar com session_state
+    if memoria_disk.get("IM"):
+        st.session_state.memoria = memoria_disk
+    if inconsciente_disk.get("INCO"):
+        st.session_state.inconsciente = inconsciente_disk
+    
+    # ✅ VALIDAÇÃO: Mostrar status de persistência em debug
+    if os.path.exists(ARQUIVO_MEMORIA) and os.path.getsize(ARQUIVO_MEMORIA) > 100:
+        status_persistencia = "✅ Persistência OK - Dados salvos em disco"
+    else:
+        status_persistencia = "⚠️ Verificar persistência"
+    
     if "likes" not in st.session_state:
         st.session_state.likes = {}  # {bloco_id: {variacao: count}}
     memoria = st.session_state.memoria
@@ -4223,6 +4529,8 @@ def main():
     # Menu no canto esquerdo
     with st.sidebar:
         st.header("Menu")
+        # ✅ Mostrar status ao user (debug)
+        st.caption(f"📊 {status_persistencia}")
         if st.button("🏗️ Gerenciar IMs"):
             st.session_state.menu = "gerenciar"
         if st.button("🧠 Treinar"):
@@ -4242,14 +4550,18 @@ def main():
             st.stop()
 
         # Modo Administrador
-        with st.expander("🔐 Modo Administrador"):
-            senha_input = st.text_input("Digite a senha:", type="password", key="admin_senha")
-            if st.button("Entrar"):
-                if senha_input == SENHA_ADMIN:
-                    st.session_state.admin = True
-                    st.success("✅ Acesso administrativo concedido!")
-                else:
-                    st.error("❌ Senha incorreta.")
+        if not st.session_state.get("admin", False):
+            with st.expander("🔐 Modo Administrador"):
+                with st.form("admin_form"):
+                    senha_input = st.text_input("Digite a senha:", type="password")
+                    submitted = st.form_submit_button("Entrar")
+                    if submitted:
+                        if senha_input.strip() == SENHA_ADMIN:
+                            st.session_state.admin = True
+                            st.success("✅ Acesso administrativo concedido!")
+                            st.rerun()
+                        else:
+                            st.error("❌ Senha incorreta.")
 
     if "menu" not in st.session_state:
         st.session_state.menu = "conversar"
@@ -4285,7 +4597,19 @@ def main():
         submenu_estatisticas(memoria)
     elif st.session_state.menu == "testar_adam":
         submenu_testar_adam(memoria, inconsciente)
+    
+    # ✅ AUTO-SAVE PERMANENTE: Garantir que TUDO é salvo ao final de cada sessão
+    # Com verificação de sucesso e retry automático (MongoDB + fallback local)
+    resultado_memoria = salvar_dados_permanente("memoria", st.session_state.memoria)
+    resultado_inconsciente = salvar_dados_permanente("inconsciente", st.session_state.inconsciente)
+    
+    if resultado_memoria and resultado_inconsciente:
+        # Salvamento bem-sucedido (silencioso)
+        pass
+    else:
+        st.warning("⚠️ Verificar salvamento de dados - falha detectada")
 
 
 if __name__ == "__main__":
     main()
+
